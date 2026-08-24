@@ -32,6 +32,30 @@ malo ni ver qué cambió entre dos días. Los `.bak` respaldan **datos**, no
 código, y guardan una sola versión anterior. El 2026-08-23 se tocó el camino del
 dinero cinco veces con los 51 tests como única red.
 
+### Migración al iMac — POSPUESTA por Jorge al próximo fin de semana / la semana que viene
+
+**Estado el 2026-08-24:** el repo ya está listo para clonar (ver arriba) y la
+arquitectura de la migración quedó decidida (abajo) — lo que falta es que
+Jorge prepare el iMac físicamente. Sin fecha exacta todavía; "la próxima
+semana o el próximo fin de semana".
+
+**Antes de ese día, del lado del código no falta nada** — verificado el
+24-ago: cero rutas de este Mac hardcodeadas en `src/`, `public/` ni en los
+scripts; `run-server.sh` resuelve todo de forma relativa y busca Node vía
+`nvm` genéricamente; cero dependencias (`npm install` no aplica); la única
+feature de Node algo reciente es `structuredClone` (Node 17+, cualquier nvm
+actual la tiene). El repo es público, así que clonar no pide token — solo
+subir cambios lo pide.
+
+**Lo que Jorge tiene que tener a mano ESE día** (no antes, no hace falta
+prepararlo hoy):
+
+1. Su API key de Binance de solo lectura, para pegarla él mismo en el `.env`
+   del iMac.
+2. El nombre de red del iMac (`scutil --get LocalHostName` parado frente al
+   iMac) — define la dirección del dashboard: `http://ese-nombre.local:8517`.
+3. Un método para pasar `data/` del Mac al iMac (AirDrop es lo más simple).
+
 ### Arquitectura de la migración — decidido el 2026-08-24, ANTES de clonar
 
 **El motor no es un sistema distribuido: es un solo proceso con un solo
@@ -85,20 +109,13 @@ Checklist actualizado para clonar:
 remota — quedó demostrado el mismo día: se pudo revisar `git status` antes de
 cada commit para verificar qué se subía.
 
-### iMac 24/7
-
-**Estado:** acordado, pospuesto por Jorge.
-
-**Medido:** 95,3 h ciegas de 120 en los primeros 5 días (79%); en las últimas
-48 h de esa medición, 91%. Los peores huecos son de madrugada, con el Mac
-durmiendo.
-
-**Mitigaciones ya aplicadas:** reconstrucción de cierres desde velas de 1 minuto
-(repara el registro), detección de despertar con aviso, y el monitor escribiendo
-la serie cada 15 min.
-
-**Pendiente asociado:** `caffeinate` en `run-server.sh` reduciría la ceguera
-mientras tanto — se dejó para hacerlo junto con la migración.
+**Por qué vale la pena (medido):** 95,3 h ciegas de 120 en los primeros 5 días
+(79%); en las últimas 48 h de esa medición, 91%. Los peores huecos son de
+madrugada, con el Mac durmiendo. Mitigaciones ya aplicadas mientras tanto:
+reconstrucción de cierres desde velas de 1 minuto (repara el registro),
+detección de despertar con aviso, y el monitor escribiendo la serie cada
+15 min — así que la ceguera actual no está destruyendo datos, solo dejando
+huecos que ya se corrigen solos.
 
 **El recordatorio que no hay que perder:** para dinero real nada de esto hace
 falta. Una OCO en Binance ejecuta sin ninguna computadora encendida.
