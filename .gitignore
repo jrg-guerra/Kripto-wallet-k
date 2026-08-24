@@ -1,0 +1,14 @@
+# Credenciales: la key de Binance y el token del bot. NUNCA versionar.
+.env
+
+# Estado de las billeteras y respaldos: son datos financieros personales.
+data/
+!data/.gitkeep
+
+# Respaldos que genera la escritura atómica
+*.bak
+*.tmp
+
+# Basura de macOS: Finder los crea en cada carpeta que visitás
+.DS_Store
+._*

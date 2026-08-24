@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kripto Wallet — Paper Trading</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/css/app.css">
+</head>
+<body>
+
+<div class="orbs" aria-hidden="true">
+  <div class="orb orb-gold"></div>
+  <div class="orb orb-violet"></div>
+  <div class="orb orb-teal"></div>
+</div>
+
+<div class="shell">
+  <div id="bannerAlertas" role="status" aria-live="polite"></div>
+  <header class="topbar">
+    <div class="brand">
+      <div class="mark" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg>
+      </div>
+      <div>
+        <h1>Kripto Wallet</h1>
+        <div class="status" id="conn"><span class="dot"></span><span id="connText">Cargando…</span><span id="liveBadge" style="display:none">&nbsp;· en vivo ●</span></div>
+        <!-- Salud del MOTOR, distinta del "en vivo" de arriba: ese es el
+             WebSocket del navegador y puede estar verde con el motor dormido. -->
+        <div class="motor-estado" id="motorEstado"><span class="dot"></span>motor…</div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn-secondary" id="refresh" aria-label="Actualizar precios del mercado y valor de las billeteras">
+        <svg class="icon-main" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+        <svg class="spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.2-8.56"/></svg>
+        <span id="refreshLabel">Actualizar mercado</span>
+      </button>
+      <button class="btn-primary" id="run" aria-label="Ejecutar análisis del mercado">
+        <svg class="icon-main" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+        <svg class="spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.2-8.56"/></svg>
+        <span id="runLabel">Ejecutar análisis</span>
+      </button>
+    </div>
+  </header>
+
+  <section class="control" id="salaControl" aria-label="Estado general"></section>
+
+  <div class="bento">
+    <article class="card wallet-card real b-real" aria-labelledby="h-real">
+    <h2 id="h-real">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg>
+    Billetera real
+    <span class="tag" id="realTag">—</span>
+    </h2>
+    <div class="headline">
+    <span class="amount" id="realTotal">—</span><span class="unit">USDT</span>
+    </div>
+    <p class="meta" id="realMeta">Esperando datos…</p>
+    <div id="realAssets"></div>
+    </article>
+
+    <article class="card wallet-card sim b-sim" aria-labelledby="h-sim">
+    <h2 id="h-sim">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 2v7.5L4.5 19a2 2 0 0 0 1.8 3h11.4a2 2 0 0 0 1.8-3L14 9.5V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/></svg>
+    Billetera ficticia
+    <span class="tag">laboratorio de estrategia</span>
+    </h2>
+    <div class="headline">
+    <span class="amount" id="simTotal">—</span><span class="unit">USDT</span>
+    <span class="pill neutral" id="simPill">—</span>
+    </div>
+    <p class="meta" id="simMeta">Esperando datos…</p>
+    <div id="simBolsillos"></div>
+    <div id="simAssets"></div>
+    </article>
+
+    <section class="card b-pos" aria-labelledby="h-pos">
+    <h2 id="h-pos">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+    Posiciones abiertas
+    <span class="tag" id="posTag">vigilancia de objetivos y límites</span>
+    </h2>
+    <div id="posiciones" class="empty">Sin posiciones con salida programada.</div>
+    </section>
+
+    <section class="card b-evo" aria-labelledby="h-evo-real">
+    <h2 id="h-evo-real">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="color:#A78BFA"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m7 14 4-4 4 3 6-6"/></svg>
+    Evolución — billetera real
+    <span class="tag">composición apilada · total y de qué está hecho</span>
+    </h2>
+    <div class="legend" id="legendReal"></div>
+    <div class="chartwrap" id="chartwrapReal">
+    <svg id="chartReal" width="100%" height="240" role="img" aria-label="Evolución del valor de cada cripto de la billetera real en USDT"></svg>
+    <div class="tooltip" id="tooltipReal"></div>
+    </div>
+    </section>
+
+    <section class="card b-evo" aria-labelledby="h-evo-sim">
+    <h2 id="h-evo-sim">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m7 14 4-4 4 3 6-6"/></svg>
+    Evolución — billetera ficticia
+    <span class="tag">composición apilada · total y de qué está hecho</span>
+    </h2>
+    <div class="legend" id="legendSim"></div>
+    <div class="chartwrap" id="chartwrapSim">
+    <svg id="chartSim" width="100%" height="240" role="img" aria-label="Evolución del valor de cada cripto de la billetera ficticia en USDT"></svg>
+    <div class="tooltip" id="tooltipSim"></div>
+    </div>
+    </section>
+
+    <section class="card b-alfa" aria-labelledby="h-alfa">
+    <h2 id="h-alfa">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>
+    Rendimiento del modelo (sleeve)
+    <span class="tag">cada jugada vs BTC en el mismo período</span>
+    </h2>
+    <div id="sleeveRend" class="empty">Sin jugadas registradas todavía.</div>
+    </section>
+
+    <section class="card b-oferta" id="cardOfertas" hidden aria-labelledby="h-oferta">
+      <h2 id="h-oferta">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+        Ofertas vigentes
+        <span class="tag" id="ofertaTag">aprobables desde acá o desde Telegram</span>
+      </h2>
+      <div id="ofertas"></div>
+    </section>
+
+    <section class="card b-watch" id="cardWatch" hidden aria-labelledby="h-watch">
+      <h2 id="h-watch">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+        En vigilancia
+        <span class="pill-new">nuevo</span>
+        <span class="tag" id="watchTag">se arman solas cuando su condición se cumple</span>
+      </h2>
+      <div id="watchlist"></div>
+    </section>
+
+    <section class="card b-reco" aria-labelledby="h-reco">
+    <h2 id="h-reco">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+    Propuesta del modelo — qué comprar y vender
+    <span class="tag" id="recoTag"></span>
+    </h2>
+    <div id="recos" class="empty">Pulsa «Ejecutar análisis» para generar la propuesta de hoy.</div>
+    <div id="propuestaAcciones"></div>
+    </section>
+
+    <section class="card b-radar" aria-labelledby="h-mkt">
+    <h2 id="h-mkt">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M7 13v4"/><path d="M12 9v8"/><path d="M17 5v12"/></svg>
+    Radar de mercado
+    <span class="tag">momentum 30 días · fase por activo · top volumen</span>
+    </h2>
+    <div id="mercado" class="empty">Sin datos aún.</div>
+    </section>
+
+    <!-- Radar de las próximas 24 h. Deliberadamente SIN columna de dirección:
+         se midió y ninguna señal le gana a comprar al azar (ver radar24h en
+         engine.mjs). Lo que se muestra es cuánto se mueve, que sí es calibrado. -->
+    <section class="card b-radar24" aria-labelledby="h-mkt24">
+    <h2 id="h-mkt24">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+    Radar 24 horas
+    <span class="pill-new">nuevo</span>
+    <span class="tag">lo que se movió y cuánto puede moverse · top volumen</span>
+    </h2>
+    <div id="mercado24" class="empty">Sin datos aún.</div>
+    </section>
+
+    <section class="card b-hist" aria-labelledby="h-hist">
+    <h2 id="h-hist">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg>
+    Historial de movimientos
+    <span class="tag">ficticios · 4 días por página</span>
+    </h2>
+    <div id="historial" class="empty">Aún no hay movimientos registrados.</div>
+    </section>
+
+    <section class="card b-mercado" aria-labelledby="h-mercado">
+    <h2 id="h-mercado">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="color:#2DD4BF"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+    Mercado real — criptos principales
+    <span class="tag">últimos 7 días · base 100 · datos en vivo de Binance</span>
+    </h2>
+    <div class="legend" id="legendMkt"></div>
+    <div class="chartwrap" id="chartwrapMkt">
+    <svg id="chartMkt" width="100%" height="260" role="img" aria-label="Evolución de los precios de BTC, ETH, BNB, SOL y XRP en los últimos 7 días, índice base 100"></svg>
+    <div class="tooltip" id="tooltipMkt"></div>
+    </div>
+    </section>
+
+    <section class="card b-chart" aria-labelledby="h-chart">
+    <h2 id="h-chart">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
+    Evolución
+    <span class="tag">índice base 100 — estrategia vs hold vs BTC</span>
+    </h2>
+    <div class="legend" id="legend"></div>
+    <div class="chartwrap" id="chartwrap">
+    <svg id="chart" width="100%" height="280" role="img" aria-label="Evolución comparada de la billetera ficticia, la billetera real y BTC"></svg>
+    <div class="tooltip" id="tooltip"></div>
+    </div>
+    </section>
+
+    <section class="card b-auto" aria-labelledby="h-auto">
+      <h2 id="h-auto">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg>
+        Registro del sistema
+        <span class="tag" id="autoTag">lo que se ejecutó sin ti</span>
+      </h2>
+      <div id="autoRegistro" class="empty">Sin movimientos automáticos todavía.</div>
+    </section>
+
+
+    <section class="card b-brecha" aria-labelledby="h-brecha">
+      <h2 id="h-brecha">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+        ¿Por qué la brecha?
+        <span class="pill-new">nuevo</span>
+        <span class="tag" id="brechaTag">cada decisión contra no haberla tomado</span>
+      </h2>
+      <div id="brecha" class="empty">Calculando la atribución…</div>
+    </section>
+
+    <section class="card b-seg" aria-labelledby="h-seg">
+      <h2 id="h-seg">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/><path d="m16 4 2-2"/></svg>
+        Qué pasó después de salir
+        <span class="pill-new">nuevo</span>
+        <span class="tag" id="segTag">¿vendimos temprano?</span>
+      </h2>
+      <div id="seguimiento" class="empty">Midiendo los cierres…</div>
+    </section>
+
+    <section class="card b-ruta" aria-labelledby="h-plan">
+    <h2 id="h-plan">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+    Hoja de ruta
+    </h2>
+    <div id="ruta"></div>
+    </section>
+
+    <section class="card b-apre" aria-labelledby="h-apre">
+      <h2 id="h-apre">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6.25 4 3v14l8 3.25 8-3.25V3Z"/><path d="M12 6.25v14"/><path d="M7.5 8.5v3"/></svg>
+        Aprendizaje
+        <span class="tag" id="apreTag">lo que vamos sabiendo</span>
+      </h2>
+      <div id="aprendizaje" class="empty">Cargando el motor de aprendizaje…</div>
+    </section>
+  </div>
+
+  <footer>
+    Modelo de pruebas: la billetera ficticia replica el capital de tu billetera real y ejecuta la estrategia
+    con precios reales de Binance, comisiones incluidas — sin enviar jamás una orden real. Las recomendaciones
+    son la salida de una estrategia automática de momentum, no asesoría financiera. Cuando el historial
+    demuestre resultados consistentes, tú decides si replicar las órdenes manualmente en Binance.
+  </footer>
+</div>
+
+<script src="/assets/js/app.js"></script>
+</body>
+</html>

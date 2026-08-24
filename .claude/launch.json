@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "kripto-wallet",
+      "runtimeExecutable": "/Users/kash/Documentos/htdocs/kripto-Wallet/run-server.sh",
+      "runtimeArgs": [],
+      "port": 8517,
+      "autoPort": false
+    }
+  ]
+}
