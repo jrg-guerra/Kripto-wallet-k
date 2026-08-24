@@ -3149,3 +3149,74 @@ Actualizado el checklist del backlog con la arquitectura completa: qué apunta a
 dónde, y el paso de apagar el servidor del Mac antes de prender el del iMac.
 
 **Lección:** antes de "prender un segundo lugar" para cualquier sistema con estado propio, preguntar explícitamente cuál de los dos manda — la pregunta de Jorge lo forzó a decidirse hoy en vez de descubrirlo con dos billeteras divergentes mañana.
+
+## 2026-08-24 (cont.) — La rampa cobra su primer caso real, y el screening se queda corto dos días seguidos
+
+### El plazo progresivo funcionó exactamente como se diseñó
+
+SUI y ORDI, comprados ayer con revisión a las 23:00, vencieron su plazo de 10 h
+durante la noche. La rampa los liberó sola, sin que nadie decidiera en el
+momento:
+
+```
+SUI    entrada 0,8248 → salida 0,8068   -2,18%   liberado 08:25
+ORDI   entrada 4,175  → salida 4,053    -2,92%   liberado 07:39
+```
+
+Sin drama, sin salto brusco de −7% a la banda de ruido: el stop subió gradual
+mientras nadie miraba y cortó cuando correspondía. Es la primera confirmación
+real del mecanismo construido el 23-ago — hasta ahora solo se había probado con
+mutación y con FET, que no llegó a vencer del todo.
+
+### El screening automático se quedó corto dos días seguidos
+
+```
+23-ago: 0 oportunidades del top-30 · ampliando a 90 pares (vol>3M): 10 candidatos sanos
+24-ago: 0 oportunidades del top-30 · misma ampliación: 15 candidatos, 6 pasaron todo
+```
+
+Los dos días con el mismo patrón: rally amplio, BTC +20%+ en 7 días, y **todo**
+el top-30 por volumen sobrecomprado a la vez (RSI>80). Los candidatos sanos —
+RSI bajo 70, volatilidad dimensionable, momentum real — vivían más abajo en
+volumen, fuera de lo que el screener automático mira. Registrado como hipótesis
+abierta (`universo-30-no-alcanza`); con n=2 y ambos días en el mismo régimen, no
+alcanza para tocar el código todavía.
+
+### GIGGLE: la capa de patrón hizo su trabajo, no la de score
+
+GIGGLE pasó la compuerta (score 69, R:B 3,0) pero **sin patrón reconocible**
+—ni pullback, ni ruptura, ni momentum— y quedó afuera. Es el diseño de las
+cuatro capas funcionando como se pensó: "sin patrón reconocible no hay entrada,
+por bueno que sea el score."
+
+### Corrección propia antes de ejecutar: "importante" no es lo mismo que "buen score"
+
+Jorge pidió invertir en "las más importantes" de seis candidatos válidos. La
+primera lectura fue por score (ICP el más alto). Verificar el volumen real
+mostró que ICP, con 6M, es tan delgado como los descartados — el criterio
+correcto para "importantes" era liquidez: SUI (86M) y WLD (29M) eran los dos
+verdaderos "majors" del lote. Se corrigió antes de ejecutar, no después.
+
+### El límite del todo-o-nada, evitado por poco
+
+3 compras de 5 USDT (15) contra 14,82 USDT libres en el sleeve — 18 centavos de
+sobra. Como una jugada con varias compras es atómica (si una rebota en la
+compuerta, se cae la jugada completa, ni las que sí pasaban se ejecutan),
+intentar las tres habría comprado CERO. Se verificó la capacidad en vivo antes
+de mandar la orden y se redujo a dos.
+
+### SUI, liberado y recomprado el mismo día, más barato
+
+```
+08:25  liberado por plazo    0,8068
+15:54  re-entrada            0,8029   (2,6% más barato)
+```
+
+Registrado como hipótesis abierta con n=1 (`plazo-libera-en-descuento`): un
+activo liberado por plazo vencido puede ser una entrada más barata poco
+después, si la tesis seguía sana. Insuficiente para actuar, suficiente para
+vigilar si se repite.
+
+**Lección:** un mecanismo nuevo no está probado hasta que actúa solo, sin que nadie lo mire en el momento — la mutación y el backtest dicen que DEBERÍA funcionar; el primer caso real dice si funciona.
+
+**Lección 2:** "importante" es ambiguo entre score y liquidez, y son criterios que pueden apuntar a activos distintos; verificar cuál pidió el usuario antes de ejecutar, no asumir el más fácil de calcular.
