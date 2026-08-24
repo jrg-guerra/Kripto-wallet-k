@@ -16,34 +16,74 @@ Los tres documentos del proyecto se reparten así:
 
 ## Bloqueado por algo externo
 
-### Control de versiones (git) — ACORDADO PARA EL 2026-08-24
+### Control de versiones (git) — HECHO el 2026-08-23
 
-**Estado:** el `.gitignore` está escrito y listo (excluye `.env` y `data/`); el
-repositorio nunca se inicializó.
+**Estado:** repo creado en `github.com/jrg-guerra/Kripto-wallet-k`, primer
+commit subido (21 archivos, `.env` y `data/` verificados fuera). Pasos 1-3
+del checklist original, completados.
 
-**Plan de Jorge (24-ago):** subir el proyecto completo a git y ponerlo a correr
-en el iMac 24/7, para fortalecer el motor y la validación, con la expectativa de
-ver un cambio sustancial hacia el día 10-15.
-
-Checklist para ese día:
-
-1. `git init` + primer commit (no necesita cuenta remota).
-2. Verificar que `.env` y `data/` quedan fuera: `git status` no debe listarlos.
-3. Crear el remoto y `git remote add` + push.
-4. En el iMac: clonar, `nvm` con Node 22+, crear su propio `.env`
-   (**Jorge pega la key, nunca el asistente**), y arrancar con `run-server.sh`.
-5. `caffeinate` en el arranque para que no se duerma.
-6. Decidir qué pasa con `data/`: NO se versiona, así que el iMac empieza con
-   estado vacío salvo que se copie a mano. **Copiar `data/` es parte de la
-   migración o se pierde el registro de la validación.**
+**Plan de Jorge:** clonar en el iMac y dejarlo 24/7, para fortalecer el motor y
+la validación, con la expectativa de ver un cambio sustancial hacia el día
+10-15 **contados desde que el iMac arranca**, no desde el día 1 del proyecto
+(ver la nota metodológica del 23-ago sobre la vigilancia del 5%).
 
 **Por qué importa:** no hay historial del código, no se puede revertir un cambio
 malo ni ver qué cambió entre dos días. Los `.bak` respaldan **datos**, no
 código, y guardan una sola versión anterior. El 2026-08-23 se tocó el camino del
 dinero cinco veces con los 51 tests como única red.
 
-**Nota:** `git init` local ya da historial y revert sin necesidad de cuenta. El
-remoto puede llegar después con `git remote add` sin perder nada.
+### Arquitectura de la migración — decidido el 2026-08-24, ANTES de clonar
+
+**El motor no es un sistema distribuido: es un solo proceso con un solo
+`data/`.** Dashboard, Telegram y las jugadas que ejecuta Claude no son tres
+sistemas sincronizados — son tres puertas al mismo servidor. Eso significa que
+**no pueden correr dos instancias vivas a la vez**: si el Mac sigue corriendo su
+propio servidor después de migrar, se crean dos billeteras ficticias
+divergiendo en paralelo, y se pierde exactamente la integridad que el sello de
+versión y las escrituras atómicas existen para proteger.
+
+**Decisión de Jorge:** Claude sigue operando desde el Mac (esta máquina, estas
+sesiones) — no hace falta correr Claude Code en el iMac. El iMac es el único
+**motor vivo**: ahí corre `run-server.sh`, ahí vive `data/`, ahí escucha el bot
+de Telegram, y el dashboard se ve en la red de casa apuntando a su dirección.
+Sin acceso remoto fuera de la red de casa (descartado por simplicidad; si hace
+falta más adelante, Tailscale es la opción a evaluar).
+
+Lo que cambia en la práctica:
+
+| Actor | Antes (todo en el Mac) | Después de migrar |
+|---|---|---|
+| Dashboard | `http://localhost:8517` | `http://iMac.local:8517` (o su IP en la LAN) |
+| Telegram bot | corre en el Mac | corre **solo** en el iMac |
+| Jugadas que ejecuta Claude | `curl 127.0.0.1:8517` | `curl` a la dirección del iMac en la LAN |
+| Código (logic/front) | se edita y prueba acá | se edita acá → `git push` → en el iMac `git pull` **+ reiniciar el proceso** (Node no recarga código solo) |
+
+**Confirmado el 24-ago antes de migrar:** el bot de Telegram está activo ahora
+mismo en el Mac (`TELEGRAM_BOT_TOKEN` configurado y el servidor corriendo). Si
+el iMac arranca su propio bot con el mismo token sin apagar antes el del Mac,
+**los dos van a competir por los mismos mensajes** de forma impredecible.
+**Apagar el servidor del Mac es un paso obligatorio de la migración, no
+opcional.**
+
+Checklist actualizado para clonar:
+
+1. ~~`git init` + commit + push~~ — hecho.
+2. En el iMac: clonar, `nvm` con Node 22+, crear su propio `.env` (**Jorge pega
+   la key, nunca el asistente**).
+3. Copiar `data/` del Mac al iMac a mano (AirDrop/USB) — **no viaja con git**;
+   sin este paso se pierde el registro de 5 días de validación.
+4. **Apagar el servidor del Mac** (`Ctrl-C` o cerrar la Terminal que lo corre)
+   ANTES de arrancar el del iMac, para que el bot de Telegram no quede
+   duplicado.
+5. En el iMac: arrancar con `run-server.sh`.
+6. `caffeinate` en el arranque para que no se duerma.
+7. Confirmar el nombre de red del iMac (`iMac.local` suele funcionar por
+   Bonjour en la misma WiFi) para poder apuntar el dashboard y las jugadas de
+   Claude ahí.
+
+**Nota:** `git init` local ya daba historial y revert sin necesidad de cuenta
+remota — quedó demostrado el mismo día: se pudo revisar `git status` antes de
+cada commit para verificar qué se subía.
 
 ### iMac 24/7
 

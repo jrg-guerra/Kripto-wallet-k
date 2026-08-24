@@ -3118,3 +3118,34 @@ mecanismo de decisión en vez de decidir a mano en el momento del vencimiento �
 exactamente para lo que se construyó ayer.
 
 **Lección:** cuando el usuario pide "decidir en el momento X", primero preguntar si ya existe un mecanismo automático corriendo esa decisión — forzarla a mano puede tirar por la ventana algo que ya se construyó para eso.
+
+## 2026-08-24 — La arquitectura de la migración, decidida antes de clonar
+
+Jorge preguntó cómo iban a reflejarse en el iMac los movimientos hechos con
+Claude, dashboard y Telegram, sin abrir el Mac — y separó eso de "actualizar el
+repo con git" para cambios de código. La pregunta destapó algo que había que
+decidir antes de clonar, no después.
+
+**El motor no es un sistema distribuido.** Dashboard, Telegram y las jugadas que
+ejecuta Claude son tres puertas al mismo proceso y al mismo `data/`, no tres
+sistemas sincronizados. Git sincroniza SOLO código — `data/` está excluido a
+propósito. Eso significa que no pueden correr dos instancias vivas a la vez: si
+el Mac sigue con su servidor después de migrar, se crean dos billeteras
+ficticias divergiendo en paralelo, exactamente lo que el sello de versión y las
+escrituras atómicas existen para evitar.
+
+**Decisión:** Claude sigue operando desde el Mac — no hace falta correr Claude
+Code en el iMac. El iMac es el único motor vivo: ahí corre el servidor, ahí
+vive `data/`, ahí escucha Telegram, y el dashboard se ve desde la red de casa.
+Cuando Claude ejecute una jugada, apunta a la dirección del iMac en la LAN en
+vez de `127.0.0.1`. Sin acceso remoto fuera de casa, por simplicidad.
+
+**Verificado antes de escribir el plan:** el bot de Telegram está activo ahora
+mismo en el Mac. Si el iMac arranca el suyo con el mismo token sin apagar antes
+el del Mac, los dos compiten por los mismos mensajes de forma impredecible —
+quedó como paso obligatorio de la migración, no opcional.
+
+Actualizado el checklist del backlog con la arquitectura completa: qué apunta a
+dónde, y el paso de apagar el servidor del Mac antes de prender el del iMac.
+
+**Lección:** antes de "prender un segundo lugar" para cualquier sistema con estado propio, preguntar explícitamente cuál de los dos manda — la pregunta de Jorge lo forzó a decidirse hoy en vez de descubrirlo con dos billeteras divergentes mañana.
