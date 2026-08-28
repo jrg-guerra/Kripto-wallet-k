@@ -3220,3 +3220,57 @@ vigilar si se repite.
 **Lección:** un mecanismo nuevo no está probado hasta que actúa solo, sin que nadie lo mire en el momento — la mutación y el backtest dicen que DEBERÍA funcionar; el primer caso real dice si funciona.
 
 **Lección 2:** "importante" es ambiguo entre score y liquidez, y son criterios que pueden apuntar a activos distintos; verificar cuál pidió el usuario antes de ejecutar, no asumir el más fácil de calcular.
+
+## 2026-08-28 — El log persistente dejó de escribir 5 días, y nadie lo notó hasta ahora
+
+Al retomar el proyecto tras varios días, `/api/estado` decía "al día" — el motor
+vigilaba con normalidad. Pero `data/servidor.log` tenía como última línea el
+**23-ago 07:47**, cinco días atrás.
+
+**La causa:** el proceso corriendo (PID 84000) se había arrancado con
+`node src/server.mjs` directo, no con `run-server.sh`. El motor funcionaba
+perfecto —vigilaba, cerraba posiciones, escribía `data/`— pero su salida de
+consola nunca pasaba por el `tee` que arma el log persistente. Exactamente el
+problema que ese mecanismo se construyó para resolver el 23-ago, reapareciendo
+por la puerta de al lado: **el arreglo protege un solo camino de arranque, y
+había otro**.
+
+Se cortó el proceso viejo y se reinició por `run-server.sh` (vía el
+`launch.json` que ya apunta ahí). El log vuelve a escribir desde las 18:57.
+
+**Efecto real, no solo el síntoma:** durante esos 5 días el sistema decidió sin
+dejar rastro diagnosticable — los `[AUTO-STOP]`, `[ALERTA]` y `[OPORTUNIDAD]` de
+esos días no están en ningún lado. `data/movimientos.jsonl` y
+`data/alertas.jsonl` sí quedaron completos (son el registro que de verdad
+importa), así que no se perdió el dato financiero — se perdió el diagnóstico
+de POR QUÉ decidió cada cosa en el momento.
+
+### Lo que pasó en esos 5 días, reconstruido desde los datos que sí persistieron
+
+```
+FET    +2,19%   trailing protegió la ganancia
+DASH   +1,97%   plazo vencido, sin rentar lo suficiente
+WLD    -1,85%   plazo vencido
+SUI    -5,48%   estructura rota → CUARENTENA
+XPL    -8,00%   estructura rota → CUARENTENA
+```
+
+**ADA y ENA se armaron 6 veces entre watchlist y screening automático — las 6
+expiraron sin aprobar.** Nadie estuvo presente en la ventana de 15 minutos
+durante 4 días. El bot de Telegram tiene el token configurado, así que las
+alertas debieron llegar al teléfono; que no se hayan tomado es de este lado,
+no una falla del sistema — es exactamente lo que "vence en 15 min" está
+diseñado para hacer cuando nadie responde: no ejecutar nada.
+
+### El rendimiento se diluyó, no se rompió
+
+```
+24-ago:  17 jugadas · 9 cerradas · acierto 67% (6/9)  · alfa +2,52 USDT
+28-ago:  17 jugadas · 16 cerradas · acierto 50% (8/16) · alfa +1,32 USDT
+```
+
+Con n=16 sigue bajo el umbral de 20 para ser señal. La caída de acierto y alfa
+es del período, no una alarma — coincide con el giro de régimen de rally amplio
+a caída amplia.
+
+**Lección:** un arreglo que depende de CÓMO se arranca el proceso no está completo si existe otra forma de arrancarlo — verificar que el mecanismo de logging sea inevitable (por ejemplo, dentro del propio server.mjs) en vez de depender de que siempre se invoque por el script correcto.
