@@ -3906,3 +3906,51 @@ aviso desaparece sin recargar.
 **Deuda declarada:** `app.js` no tiene pruebas automáticas. Montarlas exigiría
 un DOM de mentira, y este proyecto es de cero dependencias a propósito. Se
 verificó a mano y se dice acá en vez de dejarlo parecer cubierto.
+
+## 2026-09-01 (cont.) — La caché sin validar, y un diagnóstico que mintió
+
+Jorge volvió a ver la tarjeta «Billetera ficticia» vacía, esta vez con una
+captura que mostraba lo decisivo: **las demás tarjetas SÍ tenían datos** — la
+billetera real con sus filas, el capital en riesgo, las 3 ofertas esperando.
+
+### Lo que NO era
+
+Se descartó por medición, no por intuición:
+· No era el render: en mi navegador la tarjeta pintaba entera (91,28 USDT,
+  bolsillos, 6 filas de activos) a 534, 1024 y 1440 px de ancho.
+· No era el dato: `renderWallets` con el payload real de ese momento no lanza.
+· No era un error de JS: consola limpia.
+
+### El diagnóstico que mintió por el camino
+
+Buscando, `curl -I` devolvió **404** en la raíz y en `app.js`, y por un momento
+pareció que el servidor no servía nada. No era cierto: `-I` manda un HEAD, y el
+handler estático solo atendía GET, así que caía al 404 de JSON. **Un
+diagnóstico que reporta un fallo inexistente cuesta más tiempo que el bug que
+se busca** — la misma lección que el script de mercado que gritaba "0 señales"
+por no pasarle un campo. Ahora HEAD se atiende.
+
+### El defecto real
+
+El servidor no mandaba **ninguna** cabecera de caché: ni `Cache-Control`, ni
+`ETag`, ni `Last-Modified`. Sin ellas el navegador aplica caché heurística —
+reusa la respuesta un rato **sin preguntar**. En un proyecto donde `app.js`
+cambia varias veces al día, eso deja el dashboard corriendo código viejo contra
+datos nuevos, y el síntoma no se parece en nada a la causa: "se perdió con los
+últimos cambios".
+
+Ahora se manda `Cache-Control: no-cache` + `ETag` + `Last-Modified`. `no-cache`
+no significa "no guardes" sino "guarda, pero pregunta antes de usarlo": con el
+ETag la respuesta habitual es un **304 sin cuerpo**, así que revalidar sale
+gratis y nunca se sirve una versión vieja. Verificado: 200 con ETag, 304 con 0
+bytes al repetir, y ETag distinto en cuanto el archivo cambia.
+
+**Honestidad sobre el alcance:** no pude reproducir la tarjeta vacía. La caché
+sin validar es la explicación más probable y es un defecto real que se arregló,
+pero no está *confirmado* que fuera la causa. Si vuelve a pasar con este
+arreglo puesto, la hipótesis queda descartada y hay que buscar en otro lado —
+se anota así para no darlo por cerrado sin prueba.
+
+**Lección:** cuando el síntoma aparece en una máquina y no en otra con el mismo
+código y los mismos datos, lo que difiere no es el programa: es lo que cada
+navegador tenía guardado. Buscarlo en el render fue mirar donde había luz.

@@ -373,13 +373,41 @@ const server = createServer(async (req, res) => {
         return json(e.codigo ?? 500, { error: e.message });
       }
     }
-    if (req.method === 'GET') {
+    // ARCHIVOS ESTÁTICOS.
+    //
+    // Se atiende HEAD además de GET: sin eso, un `curl -I` respondía 404 y
+    // parecía que el servidor no servía nada. Un diagnóstico que miente sobre
+    // el estado del sistema hace perder más tiempo que el bug que se busca.
+    if (req.method === 'GET' || req.method === 'HEAD') {
       const ruta = req.url.split('?')[0];
       const rel = ruta === '/' ? 'index.html' : ruta.slice(1);
       const file = normalize(join(PUBLIC, rel));
       if (file.startsWith(PUBLIC) && existsSync(file) && statSync(file).isFile()) {
-        res.writeHead(200, { 'Content-Type': MIME[extname(file)] ?? 'application/octet-stream' });
-        return res.end(readFileSync(file));
+        const st = statSync(file);
+        // VALIDACIÓN DE CACHÉ. Antes no se mandaba NINGUNA cabecera de caché, y
+        // sin `Cache-Control`, `ETag` ni `Last-Modified` el navegador aplica
+        // caché heurística: reusa la respuesta un rato sin preguntar. En un
+        // proyecto donde `app.js` cambia varias veces al día, eso deja al
+        // dashboard corriendo código viejo contra datos nuevos, y el síntoma
+        // —una tarjeta que "se perdió con los últimos cambios"— no se parece en
+        // nada a su causa.
+        //
+        // `no-cache` NO significa "no guardes": significa "guarda, pero
+        // pregunta antes de usarlo". Con el ETag, la respuesta habitual es un
+        // 304 sin cuerpo, así que se revalida gratis y nunca se sirve viejo.
+        const etag = `W/"${st.size}-${st.mtimeMs}"`;
+        if (req.headers['if-none-match'] === etag) {
+          res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-cache' });
+          return res.end();
+        }
+        res.writeHead(200, {
+          'Content-Type': MIME[extname(file)] ?? 'application/octet-stream',
+          'Content-Length': st.size,
+          'Cache-Control': 'no-cache',
+          ETag: etag,
+          'Last-Modified': st.mtime.toUTCString(),
+        });
+        return res.end(req.method === 'HEAD' ? undefined : readFileSync(file));
       }
     }
     json(404, { error: 'no encontrado' });
