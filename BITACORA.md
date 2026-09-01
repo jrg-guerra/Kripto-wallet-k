@@ -3861,3 +3861,48 @@ lógica que decida, el test lo obliga a clasificarla en vez de dejarla pasar.
 **Pendiente para Jorge:** pegar su `ANTHROPIC_API_KEY` en el `.env` (la saca de
 console.anthropic.com). Hasta entonces todo esto está construido y probado pero
 inerte.
+
+## 2026-09-01 (cont.) — El panel se quedaba en blanco y no lo decía
+
+Jorge mandó una captura: la tarjeta «Billetera ficticia» vacía, con su
+cabecera y nada debajo.
+
+### El diagnóstico
+
+En el navegador que yo tenía abierto todo estaba bien —las 19 tarjetas con
+contenido, el DOM completo— así que no era un error de render. La causa
+estaba en `cargarEstado()`:
+
+```js
+try {
+  const st = await (await fetch('/api/state')).json();
+  if (st.lastRun) renderAll(...);
+} catch { /* primer uso sin datos */ }
+```
+
+Ese `catch` vacío tragaba **dos causas muy distintas**: que todavía no haya
+análisis guardado, y que el servidor no haya contestado. Hoy reinicié el motor
+ocho veces; con el panel de Jorge abierto, un refresco cayó justo en una de
+esas ventanas, el fetch falló, y el panel se quedó vacío **y mudo para
+siempre** — hasta recargar a mano.
+
+**El comentario era la trampa.** «primer uso sin datos» nombra una sola causa
+posible para un catch que atrapa varias: no es documentación, es una conclusión
+sin comprobar escrita en el único lugar donde nadie la va a cuestionar. Es la
+misma familia que los controles auditados esta semana, pero al revés: en vez de
+un control que dice OK sin mirar, un error que se presenta como estado normal.
+
+### El arreglo
+
+Se distinguen las dos causas, se avisa, y se reintenta con espera creciente
+(2, 4, 8, 15 s) porque un reinicio del servidor dura segundos y el panel tiene
+que volver solo. Tras varios intentos el mensaje cambia de «reintentando» a
+«¿está corriendo? arráncalo con run-server.sh», que es lo accionable.
+
+Verificado en vivo, no por inspección: simulando el fetch caído aparece el
+aviso con su cuenta atrás; devolviendo el fetch, el panel se recupera solo y el
+aviso desaparece sin recargar.
+
+**Deuda declarada:** `app.js` no tiene pruebas automáticas. Montarlas exigiría
+un DOM de mentira, y este proyecto es de cero dependencias a propósito. Se
+verificó a mano y se dice acá en vez de dejarlo parecer cubierto.

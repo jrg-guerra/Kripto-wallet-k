@@ -1498,11 +1498,51 @@ async function cargarEstadoMotor() {
   }
 }
 
+// Un `catch` vacío que decía "primer uso sin datos" tragaba DOS causas muy
+// distintas: que todavía no haya análisis, y que el servidor no haya
+// contestado. Con el motor reiniciándose, el panel quedaba en blanco y mudo
+// para siempre — así lo vio Jorge el 1-sep, con las tarjetas vacías y ninguna
+// explicación. Un comentario que nombra una sola causa posible no es
+// documentación: es una conclusión sin comprobar, escrita donde nadie la mira.
+//
+// Ahora se distinguen, se avisa, y se reintenta: el motor puede estar
+// levantándose, y el panel debe recuperarse solo cuando vuelva.
+let _fallosDeCarga = 0;
+
+function avisoDeCarga(texto, clase = 'peligro') {
+  const cont = $('bannerAlertas');
+  if (!cont) return;
+  const previo = cont.querySelector('.banner.carga');
+  if (!texto) { previo?.remove(); return; }
+  const el = previo ?? Object.assign(document.createElement('div'), { className: `banner carga ${clase}` });
+  el.className = `banner carga ${clase}`;
+  el.textContent = texto;
+  if (!previo) cont.prepend(el);
+}
+
 async function cargarEstado() {
   try {
-    const st = await (await fetch('/api/state')).json();
-    if (st.lastRun) renderAll({ ...st.lastRun, historia: st.historia, snapshots: st.snapshots, movimientos: st.movimientos, alertas: st.alertas });
-  } catch { /* primer uso sin datos */ }
+    const res = await fetch('/api/state');
+    if (!res.ok) throw new Error(`el motor respondió ${res.status}`);
+    const st = await res.json();
+    _fallosDeCarga = 0;
+    avisoDeCarga(null);
+    if (st.lastRun) {
+      renderAll({ ...st.lastRun, historia: st.historia, snapshots: st.snapshots, movimientos: st.movimientos, alertas: st.alertas });
+    } else {
+      // ESTA sí es la causa que el comentario viejo daba por única
+      avisoDeCarga('Todavía no hay ningún análisis guardado: pulsa «Analizar» para el primero.', 'logro');
+    }
+  } catch (e) {
+    _fallosDeCarga++;
+    const espera = Math.min(15, 2 ** _fallosDeCarga);
+    avisoDeCarga(_fallosDeCarga > 4
+      ? `Sin contacto con el motor (${e.message}). ¿Está corriendo? Arráncalo con run-server.sh.`
+      : `Sin contacto con el motor (${e.message}). Reintentando en ${espera} s…`);
+    // Reintento con espera creciente: un reinicio del servidor dura segundos y
+    // el panel tiene que volver solo, sin que nadie recargue a mano.
+    if (_fallosDeCarga <= 6) setTimeout(cargarEstado, espera * 1000);
+  }
 }
 
 async function accion(botonId, labelId, textoEspera, textoNormal, url, tambienMercado) {
