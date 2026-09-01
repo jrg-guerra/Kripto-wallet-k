@@ -3767,3 +3767,33 @@ mirando más fuerte: hay que cambiar el mecanismo. Tres auditorías a ojo
 encontraron lo primero y ninguna encontró lo segundo — lo encontró el intento de
 automatizarlo. **Escribir el test fue más informativo que las tres revisiones
 manuales juntas.**
+
+## 2026-09-01 (cont.) — El mismo arreglo, en el módulo que faltaba (v4e, `m-c9006559`)
+
+v4d selló la cadena causal de `engine.mjs` y escribió el test que la exige.
+Media hora después, revisando qué faltaba: **`aprendizaje.mjs` seguía igual de
+ciego**. Cambiar los umbrales de `regimenMercado` —los que ESE MISMO DÍA vetaron
+los 12 candidatos del screening— no movía el sello.
+
+Es el tercer caso del mismo patrón en dos días:
+- La lección "cada superficie que muestra una regla empieza a mentir" se aplicó
+  al dashboard y no a Telegram.
+- La lección "el sello no ve los helpers" se aplicó a `engine.mjs` y no a
+  `aprendizaje.mjs`.
+
+**Aplicar una lección en el sitio donde se descubrió no es aplicarla.** Hay que
+enumerar dónde más vive el mismo patrón, en el mismo momento, o queda a medias
+con la sensación de estar completo — que es peor que no haber empezado.
+
+Ahora el sello cubre también `regimenMercado`, `contextoEntrada`, `saltoVolumen`,
+`saltoVolumenDe`, `detectarSenales`, `scoreSetup`, `buscarOportunidades` y
+`avisadosRecientes`. Y el test enumera los DOS módulos: 143 funciones que tienen
+que estar clasificadas.
+
+### El test encontró tres funciones que yo no sabía que existían
+
+`calidad`, `jugadasConContexto` y `segmentar` — helpers del informe de patrones.
+Ninguna decide, así que quedaron exentas con su motivo. Pero el punto no es el
+veredicto: es que **una revisión a ojo nunca las habría listado**, y ahora
+cualquier función futura aparece sola. El test hizo su trabajo en su primera
+corrida contra código que nadie había mirado con esa pregunta.

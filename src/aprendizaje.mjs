@@ -486,11 +486,32 @@ const PESOS = { rsi: 36, fase: 24, regimen: 12, volumen: 14, rsi1h: 14 };
 // Lo que este módulo aporta al sello de versión (ver versionMotor en engine).
 // Los detectores entran como TEXTO de su función: tocar un umbral adentro de
 // `detecta` cambia el sello sin que haya que acordarse de declararlo acá.
+// La cadena causal de ESTE módulo, por la misma razón que en el motor: la
+// huella es del cuerpo de una función, no de las que llama.
+//
+// Se agregó el 2026-09-01 después de sellar la cadena de `engine.mjs` y
+// comprobar que acá seguía el mismo agujero: cambiar los umbrales de
+// `regimenMercado` —los que ese mismo día vetaron los 12 candidatos del
+// screening— **no movía el sello**. Arreglar un módulo y no el otro es el error
+// que ya se había cometido con el dashboard y Telegram.
+export const FUNCIONES_QUE_DECIDEN = {
+  // qué régimen ve el sistema: sus umbrales vetan el screening entero
+  regimenMercado,
+  // el contexto con el que se juzga a cada candidato
+  contextoEntrada, saltoVolumen, saltoVolumenDe,
+  // qué patrón se reconoce y cuánto puntúa
+  detectarSenales, scoreSetup,
+  // el filtro completo: cada rechazo sale de acá
+  buscarOportunidades, avisadosRecientes,
+};
+
 export function parametrosDeSenales() {
   return {
     umbralScore: UMBRAL_SCORE,
     pesos: PESOS,
     prioridad: PRIORIDAD,
+    logica: Object.fromEntries(
+      Object.entries(FUNCIONES_QUE_DECIDEN).map(([n, f]) => [n, huellaDeFuncion(f)])),
     // Los criterios del screener son reglas de decisión tanto como el score:
     // el veto de régimen rechazó los 12 candidatos del 1-sep él solo. No
     // estaban en el sello, así que cambiar `regimenesVetados` habría movido

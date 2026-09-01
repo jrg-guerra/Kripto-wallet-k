@@ -1907,14 +1907,40 @@ const NO_DECIDEN = {
   sello: ['huellaDeFuncion', 'parametrosDelMotor', 'versionMotor'],
 };
 
-test('ninguna función del motor queda sin clasificar frente al sello', async () => {
-  const fuente = motor._test.fs.readFileSync(join(DIR, 'engine.mjs'), 'utf8');
-  const declaradas = [...fuente.matchAll(/^(?:export )?(?:async )?function ([A-Za-z_][\w]*)/gm)]
-    .map(m => m[1]);
-  esperar(declaradas.length > 80, `debe encontrar las funciones del motor; encontró ${declaradas.length}`);
+// Las de `aprendizaje.mjs`. Sellar un módulo y dejar el otro es el error que ya
+// se cometió con el dashboard y Telegram: la lección se escribe una vez y se
+// aplica en todas partes, o no se aplicó.
+const NO_DECIDEN_APRENDIZAJE = {
+  red: ['klines', 'klines2'],
+  io: ['leerHipotesis', 'actualizarHipotesis', 'agregarHipotesis', 'registrarCandidato',
+    'leerCandidatos'],
+  instrumentacion: ['registrarDecision', 'registrarVeredicto', 'veredictosPendientes'],
+  informe: ['deriva', 'patrones', 'evolucionSistema', 'evolucionModelo', 'evolucionTrading',
+    'sellosNoDeclarados', 'informe', 'seguimientoCandidatos', 'parametrosDeSenales',
+    'tipoDeRegimen',
+    // helpers del informe de patrones: agrupan y etiquetan resultados YA
+    // ocurridos. No entra ninguno en el camino de una decisión — los encontró
+    // este mismo test, que es exactamente para lo que se escribió.
+    'calidad', 'jugadasConContexto', 'segmentar'],
+};
 
-  const selladas = new Set(Object.values(motor._test.FUNCIONES_QUE_DECIDEN).map(f => f.name));
-  const exentas = new Set(Object.values(NO_DECIDEN).flat());
+test('ninguna función del motor queda sin clasificar frente al sello', async () => {
+  const apr = await import('./aprendizaje.mjs');
+  const leer = f => motor._test.fs.readFileSync(join(DIR, f), 'utf8');
+  const nombresDe = src => [...src.matchAll(/^(?:export )?(?:async )?function ([A-Za-z_][\w]*)/gm)]
+    .map(m => m[1]);
+
+  const declaradas = [...nombresDe(leer('engine.mjs')), ...nombresDe(leer('aprendizaje.mjs'))];
+  esperar(declaradas.length > 110, `debe encontrar las funciones de ambos módulos; encontró ${declaradas.length}`);
+
+  const selladas = new Set([
+    ...Object.values(motor._test.FUNCIONES_QUE_DECIDEN),
+    ...Object.values(apr.FUNCIONES_QUE_DECIDEN),
+  ].map(f => f.name));
+  const exentas = new Set([
+    ...Object.values(NO_DECIDEN).flat(),
+    ...Object.values(NO_DECIDEN_APRENDIZAJE).flat(),
+  ]);
 
   const sinClasificar = declaradas.filter(n => !selladas.has(n) && !exentas.has(n));
   esperar(sinClasificar.length === 0,
@@ -1926,11 +1952,14 @@ test('ninguna función del motor queda sin clasificar frente al sello', async ()
   // verdad en el sello, no solo en la lista. Se compara la propiedad, no un
   // `includes` sobre el JSON: ahí las comillas del código van escapadas y la
   // comprobación falla por serialización, no por cobertura.
-  const logica = motor._test.parametrosDelMotor().logica;
-  for (const [nombre, fn] of Object.entries(motor._test.FUNCIONES_QUE_DECIDEN)) {
-    esperar(logica[nombre] === motor.huellaDeFuncion(fn),
-      `${nombre} está declarada como decisoria pero su huella no llegó al sello`);
-  }
+  const comprobar = (logica, mapa, modulo) => {
+    for (const [nombre, fn] of Object.entries(mapa)) {
+      esperar(logica[nombre] === motor.huellaDeFuncion(fn),
+        `${modulo}: ${nombre} está declarada como decisoria pero su huella no llegó al sello`);
+    }
+  };
+  comprobar(motor._test.parametrosDelMotor().logica, motor._test.FUNCIONES_QUE_DECIDEN, 'engine');
+  comprobar(apr.parametrosDeSenales().logica, apr.FUNCIONES_QUE_DECIDEN, 'aprendizaje');
 
   // Nadie puede estar en las dos listas: sería una contradicción silenciosa.
   const ambas = [...selladas].filter(n => exentas.has(n));
