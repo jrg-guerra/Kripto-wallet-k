@@ -3797,3 +3797,67 @@ Ninguna decide, así que quedaron exentas con su motivo. Pero el punto no es el
 veredicto: es que **una revisión a ojo nunca las habría listado**, y ahora
 cualquier función futura aparece sola. El test hizo su trabajo en su primera
 corrida contra código que nadie había mirado con esa pregunta.
+
+## 2026-09-01 (cont.) — Bloque D: el consejero que aconseja y no autoriza
+
+13 de 16 cierres seguían sin veredicto. No por falta de criterio: escribirlos a
+mano es tedioso y siempre hay algo más urgente. Eso mantenía muerto el bucle de
+aprendizaje — el motor registraba el contexto de cada entrada y nadie cerraba
+el ciclo diciendo qué se aprendió.
+
+`src/consejero.mjs` hace tres cosas, todas sobre hechos YA OCURRIDOS:
+veredictos de jugadas cerradas, contradicciones entre hipótesis, y el argumento
+en contra de una oferta antes de aprobarla.
+
+### La frontera, que es lo único que importa acá
+
+**El consejero no entra al camino del dinero.** La compuerta sigue siendo
+JavaScript determinista. La razón no es prudencia genérica: un modelo de
+lenguaje falla EXACTAMENTE como fallaron los tres controles podridos que
+auditamos esta semana — **sigue diciendo OK, con mejor prosa**. Es la peor
+clase posible de control, porque su modo de fallar es el más convincente.
+
+Tres propiedades lo sostienen, y las tres tienen test:
+1. **No escribe.** Devuelve borradores; el veredicto lo registra Jorge por el
+   endpoint de siempre. Verificado comparando el registro antes y después.
+2. **Lista cerrada.** Si el modelo inventa una categoría de veredicto, el
+   borrador queda marcado inválido con el texto crudo a la vista. Las cuatro
+   categorías se corrigen de formas opuestas; aceptar una quinta sería aceptar
+   cualquier cosa.
+3. **Inerte sin key.** Sin `ANTHROPIC_API_KEY` los endpoints responden 503
+   explicando qué falta y el resto del sistema no se entera.
+
+**Tampoco predice precios.** Ya está medido dos veces que no hay señal de
+dirección: pedirle un pronóstico sería fabricar un número con cara de dato,
+que es justo lo que el radar 24 h se negó a mostrar.
+
+### Lo que sí aporta
+
+La distinción cara del sistema es entre *tesis correcta* y *tesis correcta mal
+ejecutada*: se corrigen al revés, y confundirlas lleva a cambiar el criterio de
+entrada cuando el problema estaba en la salida. Esa distinción se resuelve
+mirando **qué hizo el precio DESPUÉS de vender**, que es dato que el motor ya
+tenía y nadie estaba leyendo. La evidencia que se le pasa lo incluye siempre —
+hay un test que falla si se quita, porque sin eso la pregunta se haría a ciegas.
+
+### El texto que lee es dato, no instrucción
+
+Las tesis y los motivos los escribe Jorge, pero un nombre de activo o una nota
+podrían contener cualquier cosa. La respuesta se valida contra la lista cerrada
+y nada de lo que diga se ejecuta. Es la misma postura que con cualquier fuente
+externa.
+
+### Nota de método
+
+Las dos primeras pruebas fallaron por depender del estado que dejaban otras
+—varias vacían `posiciones.json`— así que se les dio datos propios y
+deterministas. Un test que lee lo que otro dejó no prueba lo que dice probar:
+prueba el orden en que corrieron.
+
+`consejero.mjs` entró además a la enumeración del sello. No sella nada (no
+decide), pero sus funciones quedan declaradas: si mañana alguien le agrega
+lógica que decida, el test lo obliga a clasificarla en vez de dejarla pasar.
+
+**Pendiente para Jorge:** pegar su `ANTHROPIC_API_KEY` en el `.env` (la saca de
+console.anthropic.com). Hasta entonces todo esto está construido y probado pero
+inerte.

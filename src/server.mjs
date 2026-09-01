@@ -167,6 +167,25 @@ const server = createServer(async (req, res) => {
       const { seguimientoCandidatos } = await import('./aprendizaje.mjs');
       return json(200, await seguimientoCandidatos());
     }
+    // CONSEJERO — borradores, nunca ejecuciones. Ver la cabecera de
+    // consejero.mjs: no entra al camino del dinero por diseño.
+    if (req.method === 'GET' && req.url.startsWith('/api/consejero/')) {
+      const c = await import('./consejero.mjs');
+      if (!c.disponible()) {
+        return json(503, { error: 'consejero no configurado', detalle: 'Falta ANTHROPIC_API_KEY en el .env (la pegas tú; ver .env.example)' });
+      }
+      const que = req.url.slice('/api/consejero/'.length).split('?')[0];
+      if (que === 'veredictos') return json(200, await c.borradoresDeVeredicto());
+      if (que === 'hipotesis') return json(200, await c.curarHipotesis());
+      return json(404, { error: 'no encontrado' });
+    }
+    // El abogado del diablo recibe la oferta a rebatir: es lectura, pero lleva
+    // cuerpo, así que va por POST.
+    if (req.method === 'POST' && req.url === '/api/consejero/abogado') {
+      const c = await import('./consejero.mjs');
+      if (!c.disponible()) return json(503, { error: 'consejero no configurado' });
+      return json(200, await c.abogadoDelDiablo(await leerBody(req)));
+    }
     // Veredicto de una jugada cerrada: lo que convierte un resultado en lección
     if (req.method === 'POST' && req.url === '/api/veredicto') {
       try {

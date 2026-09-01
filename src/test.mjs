@@ -1930,16 +1930,29 @@ test('ninguna función del motor queda sin clasificar frente al sello', async ()
   const nombresDe = src => [...src.matchAll(/^(?:export )?(?:async )?function ([A-Za-z_][\w]*)/gm)]
     .map(m => m[1]);
 
-  const declaradas = [...nombresDe(leer('engine.mjs')), ...nombresDe(leer('aprendizaje.mjs'))];
-  esperar(declaradas.length > 110, `debe encontrar las funciones de ambos módulos; encontró ${declaradas.length}`);
+  const declaradas = [
+    ...nombresDe(leer('engine.mjs')),
+    ...nombresDe(leer('aprendizaje.mjs')),
+    ...nombresDe(leer('consejero.mjs')),
+  ];
+  esperar(declaradas.length > 110, `debe encontrar las funciones de los tres módulos; encontró ${declaradas.length}`);
 
   const selladas = new Set([
     ...Object.values(motor._test.FUNCIONES_QUE_DECIDEN),
     ...Object.values(apr.FUNCIONES_QUE_DECIDEN),
   ].map(f => f.name));
+  // `consejero.mjs` no decide NADA por diseño: redacta borradores sobre hechos
+  // ya ocurridos y los deja esperando confirmación. Va entero a la exención —
+  // pero va, para que una función futura que sí decidiera tenga que declararse
+  // en vez de aparecer sin que nadie la mire.
+  const NO_DECIDEN_CONSEJERO = ['leerEnv', 'disponible', 'preguntar', 'extraerJSON',
+    'evidenciaDe', 'borradoresDeVeredicto', 'curarHipotesis', 'abogadoDelDiablo',
+    'sembrarJugadaCerrada'];
+
   const exentas = new Set([
     ...Object.values(NO_DECIDEN).flat(),
     ...Object.values(NO_DECIDEN_APRENDIZAJE).flat(),
+    ...NO_DECIDEN_CONSEJERO,
   ]);
 
   const sinClasificar = declaradas.filter(n => !selladas.has(n) && !exentas.has(n));
@@ -1977,6 +1990,110 @@ test('el sello ve una regla que vive en un helper, no solo en la función princi
     'y el que mide la volatilidad, que decide todos los stops');
   esperar(antes.logica.drawdownActual != null && antes.logica.estadoSleeve != null,
     'y los que alimentan a la compuerta: si su lógica cambia, cambia qué se bloquea');
+});
+
+// --- EL CONSEJERO ACONSEJA, NUNCA AUTORIZA -----------------------------------
+//
+// La propiedad que hace seguro a todo el bloque D: nada de lo que diga el
+// modelo llega al registro sin pasar por una validación cerrada y por Jorge.
+// Un modelo de lenguaje falla como fallaron los controles podridos que
+// auditamos —sigue diciendo OK, con mejor prosa— así que se lo trata como a una
+// fuente externa, no como a una autoridad.
+
+// Datos propios: las pruebas anteriores vacían `posiciones.json`, y depender
+// del estado que dejó otra prueba es cómo un test empieza a medir otra cosa.
+// Una jugada cerrada, sin veredicto, que subió DESPUÉS de venderse — el caso
+// que separa "tesis correcta" de "tesis correcta mal ejecutada".
+function sembrarJugadaCerrada() {
+  motor._test.escribirJSON(join(process.env.KW_DATA, 'posiciones.json'), {
+    posiciones: [{
+      id: 'pos-consejero', asset: 'SOL', qty: 0.05, entrada: 100,
+      objetivoPct: 15, limitePct: -6, estado: 'cerrada',
+      abierto: new Date(Date.now() - 30 * 3_600_000).toISOString(),
+      cerrado: new Date(Date.now() - 6 * 3_600_000).toISOString(),
+      motivoCierre: 'objetivo (toma de ganancia)', precioSalida: 115, pnlPct: 15,
+      version: 'm-test',
+    }],
+  });
+  motor._test.escribirJSON(join(process.env.KW_DATA, 'seguimiento.json'), {
+    'pos-consejero': { completo: true, h24Pct: 7.2, h48Pct: 9.8, maximoPct: 12.4 },
+  });
+}
+
+// Anthropic de mentira: devuelve el texto que la prueba le indique.
+async function sinClaude(respuesta, fn) {
+  const original = globalThis.fetch;
+  const previa = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-de-mentira-para-tests-0123456789';
+  globalThis.fetch = async () => ({
+    ok: true, status: 200, text: async () => '',
+    json: async () => ({ content: [{ type: 'text', text: respuesta }] }),
+  });
+  try { return await fn(); } finally {
+    globalThis.fetch = original;
+    if (previa === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previa;
+  }
+}
+
+test('un veredicto inventado por el modelo NO se cuela al registro', async () => {
+  const c = await import('./consejero.mjs');
+  const { readFileSync } = await import('node:fs');
+  sembrarJugadaCerrada();
+  const antes = readFileSync(join(process.env.KW_DATA, 'aprendizaje.jsonl'), 'utf8');
+
+  // El modelo devuelve una categoría que no existe. Tiene que quedar marcada
+  // como inválida, no colarse: la lista de veredictos es cerrada porque cada
+  // una se corrige de forma distinta.
+  const r = await sinClaude('{"veredicto":"buenisima-jugada","leccion":"comprar mas"}',
+    () => c.borradoresDeVeredicto({ limite: 1 }));
+  esperar(r.borradores.length === 1, 'debe producir un borrador');
+  esperar(r.borradores[0].veredicto === null,
+    `un veredicto fuera de la lista cerrada no puede aceptarse; dio '${r.borradores[0].veredicto}'`);
+  esperar(/fuera del formato/.test(r.borradores[0].invalido ?? ''),
+    'y tiene que decir por qué se descartó');
+
+  // Y lo esencial: el consejero NO escribe. El registro queda intacto.
+  esperar(readFileSync(join(process.env.KW_DATA, 'aprendizaje.jsonl'), 'utf8') === antes,
+    'el consejero no puede tocar el registro de aprendizaje: solo Jorge lo hace');
+});
+
+test('un veredicto válido llega como borrador con su evidencia, sin registrarse', async () => {
+  const c = await import('./consejero.mjs');
+  const { readFileSync } = await import('node:fs');
+  sembrarJugadaCerrada();
+  const antes = readFileSync(join(process.env.KW_DATA, 'aprendizaje.jsonl'), 'utf8');
+
+  const r = await sinClaude(
+    'Acá va mi análisis:\n{"veredicto":"tesis-correcta-mala-ejecucion","leccion":"el objetivo cortó temprano","confianza":"alta","porQue":"subió 7% mas"}\nEspero que sirva.',
+    () => c.borradoresDeVeredicto({ limite: 1 }));
+  const b = r.borradores[0];
+  esperar(b.veredicto === 'tesis-correcta-mala-ejecucion',
+    `debe extraer el JSON aunque venga con prosa alrededor; dio '${b.veredicto}'`);
+  esperar(b.leccion === 'el objetivo cortó temprano', 'y conservar la lección');
+  // La evidencia tiene que incluir lo que separa "tesis correcta" de "mala
+  // ejecución": qué hizo el precio DESPUÉS de vender. Sin eso, la distinción
+  // más importante del veredicto se pediría a ciegas.
+  esperar('despuesDeVender' in b.evidencia,
+    'la evidencia debe traer el seguimiento post-cierre, que es lo que distingue los dos veredictos');
+  esperar(r.nota.includes('BORRADORES'), 'la respuesta debe declarar que no registró nada');
+  esperar(readFileSync(join(process.env.KW_DATA, 'aprendizaje.jsonl'), 'utf8') === antes,
+    'sigue sin poder escribir');
+});
+
+test('sin API key el consejero queda inerte y no rompe nada', async () => {
+  const c = await import('./consejero.mjs');
+  const previa = process.env.ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  try {
+    esperar(c.disponible() === false, 'sin key debe declararse no disponible');
+    let codigo = null;
+    try { await c.borradoresDeVeredicto({ limite: 1 }); } catch (e) { codigo = e.codigo; }
+    // O bien no hay pendientes, o bien falla con 503 explicando qué falta.
+    esperar(codigo === 503 || codigo === null, `debe fallar con 503 y no con un error opaco; dio ${codigo}`);
+  } finally {
+    if (previa !== undefined) process.env.ANTHROPIC_API_KEY = previa;
+  }
 });
 
 // --- correr ------------------------------------------------------------
