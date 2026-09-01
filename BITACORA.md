@@ -3945,11 +3945,18 @@ ETag la respuesta habitual es un **304 sin cuerpo**, así que revalidar sale
 gratis y nunca se sirve una versión vieja. Verificado: 200 con ETag, 304 con 0
 bytes al repetir, y ETag distinto en cuanto el archivo cambia.
 
-**Honestidad sobre el alcance:** no pude reproducir la tarjeta vacía. La caché
-sin validar es la explicación más probable y es un defecto real que se arregló,
-pero no está *confirmado* que fuera la causa. Si vuelve a pasar con este
-arreglo puesto, la hipótesis queda descartada y hay que buscar en otro lado —
-se anota así para no darlo por cerrado sin prueba.
+**Alcance, y su cierre.** Al publicar el arreglo no se podía reproducir la
+tarjeta vacía, así que la caché quedó anotada como la explicación más probable
+pero NO confirmada, con un criterio de refutación escrito por adelantado: si
+volvía a pasar con el arreglo puesto, la hipótesis caía.
+
+**Confirmada el mismo día:** con una recarga forzada la tarjeta volvió y no
+reapareció. La causa era la caché sin validar.
+
+Vale más el método que el resultado: la hipótesis se publicó con su condición
+de refutación ANTES de saber si era cierta. Sin eso, cualquier arreglo que
+coincida con la desaparición del síntoma se lleva el crédito, y se archiva como
+causa algo que fue una casualidad.
 
 **Lección:** cuando el síntoma aparece en una máquina y no en otra con el mismo
 código y los mismos datos, lo que difiere no es el programa: es lo que cada
