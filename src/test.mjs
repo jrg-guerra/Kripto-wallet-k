@@ -1860,6 +1860,96 @@ test('un trailing cruzado mientras nadie miraba se ejecuta en SU nivel, no al pr
     `con el trailing sin armar rige el stop original y no hay cruce; dio ${JSON.stringify(tampoco)}`);
 });
 
+// --- LA COBERTURA DEL SELLO, ENUMERADA EN VEZ DE RECORDADA -------------------
+//
+// El sello se auditó "a ojo" tres veces el 2026-09-01 y las tres se le escapó
+// algo: la política de salida, los criterios del screener y la reconstrucción
+// de cierres. Tres seguidas no son mala suerte — son la prueba de que revisarlo
+// de memoria no es un método.
+//
+// Este test invierte el modo de fallar. Antes, una función nueva que decidiera
+// algo quedaba fuera del sello EN SILENCIO. Ahora tiene que estar clasificada:
+// o decide (y entonces va sellada), o alguien declara por qué no. Una función
+// sin clasificar **rompe la suite**, que es exactamente el ruido que faltaba.
+//
+// La clasificación se escribe a mano —no hay forma de deducir "esto decide
+// dinero" del código— pero su COMPLETITUD no depende de nadie: se contrasta
+// contra las funciones que de verdad existen en el archivo.
+const NO_DECIDEN = {
+  // lectura y escritura de estado: mueven bytes, no criterios
+  io: ['escribirEstado', 'leerJSON', 'leerAprendizaje', 'appendAprendizaje', 'leerWatch',
+    'leerSeguridad', 'leerOfertas', 'escribirOfertas', 'loadEnv', 'loadWallet',
+    'snapshotWalletValue', 'readHistory', 'upsertHistoria', 'appendSnapshot',
+    'appendMovimientos', 'readMovimientos', 'readSnapshots', 'lastRunPrevio',
+    'readPosiciones', 'writePosiciones', 'leerSeguimiento', 'readAlertas',
+    'persistLastRun', 'registrarVersion', 'registrarSnapshotDeVigilancia',
+    'leerVersiones', 'escribirWatch'],
+  // plomería de red: traen datos, no los interpretan
+  red: ['pub', 'signedGet', 'marketSnapshotLigero', 'realWalletValue', 'valueBalances'],
+  // validan forma, no montos ni niveles
+  validacion: ['montoValido', 'activoValido', 'validarEntrada', 'validarContraCartera'],
+  // aplican una decisión YA tomada al estado
+  estado: ['abrirPosicion', 'fijarHorizonte', 'cerrarPosicion', 'reducirPosicion',
+    'fijarTrailing', 'confirmarJugada', 'congelar', 'descongelar', 'crearOferta',
+    'vigilarOferta', 'descartarOferta', 'cancelarWatch', 'marcarWatchOferta',
+    'caducarOfertas', 'caducarWatch'],
+  // derivan una vista o un informe; nada de lo que devuelven decide
+  consulta: ['watchlist', 'ofertasVigentes', 'activosNecesarios', 'activosEnCartera',
+    'getState', 'estadisticaJugadas', 'cierres', 'atribucionBrecha', 'seguimientoCierres',
+    'comisionesPagadas', 'getAlertas', 'rendimientoSleeve', 'simSummary', 'radar24h',
+    'marketHistory', 'radarParaBot', 'leerCandidatos'],
+  // secuencian a otras; las decisiones viven en las que llaman
+  orquesta: ['evaluarWatchlist', 'evaluarPosiciones', 'chequearAlertas', 'jugadaManual',
+    'aplicarPlan', 'refreshMarket', 'conCandado', 'enParalelo', 'registrarContexto'],
+  // formato para mostrar
+  formato: ['fechaLocal', 'cambios24hPara'],
+  // el mecanismo del sello no puede sellarse a sí mismo
+  sello: ['huellaDeFuncion', 'parametrosDelMotor', 'versionMotor'],
+};
+
+test('ninguna función del motor queda sin clasificar frente al sello', async () => {
+  const fuente = motor._test.fs.readFileSync(join(DIR, 'engine.mjs'), 'utf8');
+  const declaradas = [...fuente.matchAll(/^(?:export )?(?:async )?function ([A-Za-z_][\w]*)/gm)]
+    .map(m => m[1]);
+  esperar(declaradas.length > 80, `debe encontrar las funciones del motor; encontró ${declaradas.length}`);
+
+  const selladas = new Set(Object.values(motor._test.FUNCIONES_QUE_DECIDEN).map(f => f.name));
+  const exentas = new Set(Object.values(NO_DECIDEN).flat());
+
+  const sinClasificar = declaradas.filter(n => !selladas.has(n) && !exentas.has(n));
+  esperar(sinClasificar.length === 0,
+    `hay funciones sin clasificar: ${sinClasificar.join(', ')}. ` +
+    'Cada una tiene que ir a FUNCIONES_QUE_DECIDEN (si cambia una decisión de dinero) ' +
+    'o a NO_DECIDEN con su motivo. Decidir es el trabajo; olvidarse no es una opción.');
+
+  // Y al revés: una función clasificada como decisoria tiene que estar de
+  // verdad en el sello, no solo en la lista. Se compara la propiedad, no un
+  // `includes` sobre el JSON: ahí las comillas del código van escapadas y la
+  // comprobación falla por serialización, no por cobertura.
+  const logica = motor._test.parametrosDelMotor().logica;
+  for (const [nombre, fn] of Object.entries(motor._test.FUNCIONES_QUE_DECIDEN)) {
+    esperar(logica[nombre] === motor.huellaDeFuncion(fn),
+      `${nombre} está declarada como decisoria pero su huella no llegó al sello`);
+  }
+
+  // Nadie puede estar en las dos listas: sería una contradicción silenciosa.
+  const ambas = [...selladas].filter(n => exentas.has(n));
+  esperar(ambas.length === 0, `clasificadas dos veces: ${ambas.join(', ')}`);
+});
+
+test('el sello ve una regla que vive en un helper, no solo en la función principal', async () => {
+  // El punto ciego real: la huella es `String(fn)`, o sea el cuerpo de ESA
+  // función. Sellar `evaluarNiveles` no sellaba `umbralPlazoPct`, que ella
+  // llama — cambiar BANDA_RUIDO_VOL adentro del helper no movía el hash.
+  const antes = motor._test.parametrosDelMotor();
+  esperar(antes.logica.umbralPlazoPct != null,
+    'el helper que calcula el umbral del plazo tiene que estar en el sello');
+  esperar(antes.logica.volatilidadDiaria != null,
+    'y el que mide la volatilidad, que decide todos los stops');
+  esperar(antes.logica.drawdownActual != null && antes.logica.estadoSleeve != null,
+    'y los que alimentan a la compuerta: si su lógica cambia, cambia qué se bloquea');
+});
+
 // --- correr ------------------------------------------------------------
 console.log(`\nTests de la matemática de dinero · sandbox ${sandbox}\n`);
 for (const c of casos) {

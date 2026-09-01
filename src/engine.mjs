@@ -3238,6 +3238,46 @@ export function huellaDeFuncion(fn) {
     .trim();
 }
 
+// TODAS las funciones en el camino causal de una decisión de dinero.
+//
+// EL PUNTO CIEGO QUE ESTO CIERRA. La huella es `String(fn)`: el cuerpo de ESA
+// función y nada más. Sellar `evaluarNiveles` no sella `umbralPlazoPct`, que
+// ella llama — demostrado el 2026-09-01 cambiando `BANDA_RUIDO_VOL` por 0,9
+// dentro del helper: **el sello no se movió**. No era un olvido más, era que
+// el mecanismo solo veía el primer nivel de la llamada.
+//
+// Por eso acá va la cadena completa, no solo las funciones "principales": los
+// helpers que calculan niveles (`volatilidadDiaria`, `umbralPlazoPct`), los que
+// alimentan la compuerta (`drawdownActual`, `estadoSleeve`, `riesgoAbierto`),
+// los que valorizan (`walletValue`, `valorDe`), los que producen operaciones
+// (`rebalance`, `cosecharExcedente`) y los que vetan (`enCuarentena`).
+//
+// SE PREFIERE PASARSE. Incluir de más hace que un refactor sin cambio de
+// conducta mueva el sello: un falso positivo, molesto. Incluir de menos deja
+// una regla cambiando en silencio: un falso negativo, que es el error que este
+// mecanismo existe para no cometer. `test.mjs` verifica que esta lista cubra
+// todas las funciones clasificadas como decisorias — y que una función NUEVA
+// sin clasificar rompa la suite en vez de pasar inadvertida.
+const FUNCIONES_QUE_DECIDEN = {
+  // niveles de entrada y tamaño
+  planDeEntrada, montoPorRiesgo, stopsSugeridos, volatilidadDiaria,
+  // salida: cuándo y a qué precio
+  evaluarNiveles, umbralPlazoPct, volatilidadDe, reconstruirCruce, picoAntesDe,
+  refrescarPicos, ejecutarStops,
+  // qué se bloquea
+  compuertaRiesgo, drawdownActual, estadoSleeve, riesgoAbierto,
+  enCuarentena, diasDesdeCorte,
+  // valorización: si el total está mal, la compuerta bloquea mal
+  walletValue, valorDe, holdingsPlanos, bolsillosNoDeclarados,
+  // qué operaciones se producen
+  rebalance, cosecharExcedente, evaluarPropuesta, aplicarVentas,
+  // qué se compra y cuándo entra
+  marketSnapshot, momentumModelo, rsi, clasificarTendencia, runAnalysis,
+  condicionCumplida, agregarWatch, tomarOferta,
+  // clasificación del capital heredado
+  migrarWallet,
+};
+
 // Los números que definen CÓMO decide el motor. Entran los que cambian una
 // decisión; no entran rutas, timeouts ni textos. Si agregás una regla nueva con
 // un número propio, va acá — si no, el sello miente por omisión.
@@ -3250,35 +3290,17 @@ function parametrosDelMotor() {
     rbMinimo: RB_MINIMO, objetivoMaxVecesStop: OBJETIVO_MAX_VECES_STOP,
     drawdownMaxPct: DRAWDOWN_MAX_PCT, riesgoAbiertoMaxPct: RIESGO_ABIERTO_MAX_PCT,
     volDiariaAvisoPct: VOL_DIARIA_AVISO_PCT, riesgoDesvioMaxVeces: RIESGO_DESVIO_MAX_VECES,
-    limiteSleevePct: LIMITE_SLEEVE_PCT, picks: PICKS,
+    limiteSleevePct: LIMITE_SLEEVE_PCT, picks: PICKS, candidatos: CANDIDATOS,
     cuarentenaDias: CUARENTENA_DIAS, ventanaModeloDias: VENTANA_MODELO_DIAS,
     driftMaxPct: DRIFT_MAX_PCT, watchDias: WATCH_DIAS,
     reconstruccionMaxH: RECONSTRUCCION_MAX_H,
     // La política con que nacen las posiciones nuevas: qué las saca y cuándo.
     // Es una decisión del motor tanto como el stop, así que va al sello.
     politicaSalida: POLITICA_SALIDA,
-    // Las cuatro funciones donde vive una decisión: qué niveles se ponen al
-    // entrar, cuánta plata se compromete, qué se bloquea, y CUÁNDO SE SALE.
-    // Cualquier regla nueva cae adentro de una de ellas, así que el sello la ve
-    // aunque nadie la declare.
-    //
-    // `salida` se agregó el 2026-09-01 tapando un hueco que iba a morder justo
-    // en el cambio siguiente: la política de salida —el objetivo, el trailing y
-    // la rampa del plazo— no entraba en el sello por ningún lado. El replay
-    // acababa de medir que ahí está la mayor palanca del sistema, y cambiarla
-    // habría dejado las jugadas nuevas atribuidas al motor viejo.
-    logica: {
-      plan: huellaDeFuncion(planDeEntrada),
-      sizing: huellaDeFuncion(montoPorRiesgo),
-      compuerta: huellaDeFuncion(compuertaRiesgo),
-      salida: huellaDeFuncion(evaluarNiveles),
-      // A QUÉ PRECIO se ejecuta una salida también es una decisión de dinero:
-      // reconstruir el cruce en su nivel o vender al precio del despertar
-      // difiere en 12 puntos porcentuales en el caso medido. Tercera vez que
-      // aparece el mismo hueco de cobertura el mismo día — ver la lección en
-      // BITACORA: la pregunta no es "¿el sello funciona?" sino "¿qué no mira?".
-      reconstruccion: huellaDeFuncion(reconstruirCruce),
-    },
+    // La huella del CÓDIGO de cada función en el camino causal de una decisión
+    // de dinero. Ver `FUNCIONES_QUE_DECIDEN`.
+    logica: Object.fromEntries(
+      Object.entries(FUNCIONES_QUE_DECIDEN).map(([n, f]) => [n, huellaDeFuncion(f)])),
   };
 }
 
@@ -3359,7 +3381,7 @@ export function radarParaBot(n = 5) {
 // Internos expuestos SOLO para los tests (src/test.mjs). No los use el server:
 // la superficie pública del motor son los `export function` de arriba.
 export const _test = {
-  FEE, walletValue, rebalance, migrarWallet, escribirJSON, escribirEstado, leerJSON,
+  FEE, parametrosDelMotor, FUNCIONES_QUE_DECIDEN, walletValue, rebalance, migrarWallet, escribirJSON, escribirEstado, leerJSON,
   BOLSILLOS, simSummary, valorDe, clasificarTendencia,
   stopsSugeridosPuro: planDeEntrada, enParalelo, volatilidadDiaria,
   reconstruirCruce,

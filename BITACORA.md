@@ -3712,3 +3712,58 @@ día: la política de salida, los criterios del screener, y ahora ésta.
 enumeración de las decisiones del motor, no de la memoria de quien la revisa.
 Tres hallazgos seguidos en el mismo día no son mala suerte: son la prueba de que
 el método de auditarlo estaba mal.
+
+## 2026-09-01 (cont.) — El sello tenía un punto ciego estructural (v4d, `m-3944ea1d`)
+
+Al construir el test que Jorge pidió —uno que enumere las funciones de dinero y
+falle si alguna no está sellada— apareció algo peor que los tres huecos del día.
+
+### El punto ciego
+
+La huella es `String(fn)`: **el cuerpo de ESA función y nada más**. Sellar
+`evaluarNiveles` no sella `umbralPlazoPct`, que ella llama.
+
+Demostrado antes de arreglarlo: cambiando `BANDA_RUIDO_VOL` por 0,9 dentro del
+helper —una regla que mueve el nivel de salida de toda posición con plazo— el
+sello **no se movió**. Los tres hallazgos anteriores (política de salida,
+criterios del screener, reconstrucción) eran olvidos de enumeración. Éste no:
+el mecanismo solo veía el primer nivel de la llamada.
+
+Ahora el sello cubre la cadena causal completa: **34 funciones en vez de 5**.
+Los helpers que calculan niveles, los que alimentan la compuerta, los que
+valorizan la cartera, los que producen operaciones y los que vetan. Además
+entró `CANDIDATOS` (el tamaño del universo del screener), que tampoco estaba.
+
+**Se prefiere pasarse.** Incluir de más hace que un refactor sin cambio de
+conducta mueva el sello: molesto. Incluir de menos deja una regla cambiando en
+silencio: el error exacto que el mecanismo existe para no cometer.
+
+### El test invierte el modo de fallar
+
+Antes, una función nueva que decidiera algo quedaba fuera del sello **en
+silencio**. Ahora tiene que estar clasificada: o decide —y va sellada— o alguien
+declara por qué no, con motivo. Una función sin clasificar **rompe la suite**.
+
+La clasificación se escribe a mano (no hay forma de deducir "esto decide dinero"
+del código), pero **su completitud no depende de nadie**: se contrasta contra las
+funciones que de verdad existen en el archivo. Las 113 del motor quedaron
+repartidas entre las 34 selladas y siete categorías con su razón: io, red,
+validación, estado, consulta, orquestación, formato.
+
+Verificado por mutación en los dos sentidos: agregando una función nueva sin
+clasificar la suite falla nombrándola y diciendo qué hacer; sacando
+`umbralPlazoPct` del sello fallan tres tests.
+
+Un tropiezo propio en el camino: la primera versión comprobaba la cobertura con
+`JSON.stringify(logica).includes(huella)` y fallaba en una sola función. No era
+el motor — era que las comillas del código van escapadas en el JSON. Comparar la
+propiedad directamente es exacto; buscar substrings dentro de un serializado es
+comparar dos cosas distintas y creer que son la misma.
+
+**Lección:** un mecanismo de vigilancia tiene dos formas de fallar, y sólo
+pensamos en una. Que se olvide de mirar algo (cobertura) se arregla enumerando.
+Que **no pueda** ver algo por cómo está construido (alcance) no se arregla
+mirando más fuerte: hay que cambiar el mecanismo. Tres auditorías a ojo
+encontraron lo primero y ninguna encontró lo segundo — lo encontró el intento de
+automatizarlo. **Escribir el test fue más informativo que las tres revisiones
+manuales juntas.**
