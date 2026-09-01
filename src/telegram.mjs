@@ -752,9 +752,20 @@ const COMANDOS = {
       ...pos.map(p => {
         return cita(`${luzDe(p)} <b>${esc(p.asset)}</b>  ${pct(p.pnlPct)}  <i>${signo(p.pnlUSDT)} USDT</i>`)
           + ficha([
-            ['Límite', `${precio(p.limite)}  (${p.limitePct}%)`],
+            // El nivel que de verdad va a vender es el EFECTIVO: bajo política
+            // de trailing manda el pico, no el stop original. Mostrar el
+            // original sería anunciar un precio de salida que no es el que se
+            // va a ejecutar — el mismo defecto que tenía el dashboard.
+            [p.trailActivo ? 'Trailing' : 'Límite',
+              `${precio(p.limiteEfectivo ?? p.limite)}  (${p.limitePctEfectivo ?? p.limitePct}%)`],
             ['Ahora', precio(p.precio)],
-            ['Objetivo', `${precio(p.objetivo)}  (+${p.objetivoPct}%)`],
+            // Con política de trailing el objetivo dejó de vender: es la
+            // referencia estructural con la que se midió el R:B al entrar.
+            p.politicaSalida === 'trailing'
+              ? ['Techo 30d', `${precio(p.objetivo)}  (+${p.objetivoPct}%) · referencia`]
+              : ['Objetivo', `${precio(p.objetivo)}  (+${p.objetivoPct}%)`],
+            p.politicaSalida === 'trailing' && !p.trailActivo && p.trailPct != null
+              && ['Trailing', `${p.trailPct}% · arma en +${p.activarTrailEnPct}%`],
             ['Recorrido', barraMarcador(p.progreso)],
             p.horizonteHoras != null && ['Plazo', `${p.horasRestantesPlazo.toFixed(0)}h restantes de ${p.horizonteHoras}h`],
           ]);

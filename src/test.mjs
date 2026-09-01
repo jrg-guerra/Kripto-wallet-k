@@ -1795,6 +1795,71 @@ test('cada candidato juzgado se registra una sola vez por día', async () => {
     'al leer, un duplicado de (activo, fecha) no puede contarse dos veces');
 });
 
+// --- LA RECONSTRUCCIÓN TIENE QUE SEGUIR AL TRAILING --------------------------
+//
+// Con v4a el trailing ES la salida principal. La reconstrucción buscaba siempre
+// el stop ORIGINAL, así que un trailing cruzado de madrugada no se encontraba
+// nunca y se vendía al precio del despertar — perdiendo justo la ventaja que la
+// política venía a capturar.
+test('un trailing cruzado mientras nadie miraba se ejecuta en SU nivel, no al precio de ahora', async () => {
+  const r = motor._test.reconstruirCruce;
+  const hace = h => new Date(Date.now() - h * 3_600_000).toISOString();
+
+  // TRAYECTORIA REAL, no velas planas: sube de 100 a 130 y baja a 110. El mock
+  // corriente genera una serie plana, y con ella el pico nunca se forma — la
+  // reconstrucción del trailing solo se puede probar con un camino que suba
+  // primero. (El pico se DERIVA de las velas a propósito: sembrarlo con
+  // `picoDesdeApertura`, que es el máximo de toda la vida, pondría el nivel
+  // demasiado arriba desde el primer minuto.)
+  const MIN = 360;
+  const precioEn = i => i < MIN / 2
+    ? 100 + (30 * i) / (MIN / 2)              // 100 → 130
+    : 130 - (20 * (i - MIN / 2)) / (MIN / 2); // 130 → 110
+  const conCamino = fn => async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async url => {
+      const u = new URL(String(url));
+      const fin = Date.now();
+      const n = Math.min(Number(u.searchParams.get('limit') ?? MIN), MIN);
+      const paso = u.searchParams.get('interval') === '1m' ? 60_000 : 3_600_000;
+      return {
+        ok: true, status: 200, text: async () => '',
+        json: async () => Array.from({ length: n }, (_, k) => {
+          const i = Math.round((k / (n - 1)) * (MIN - 1));
+          const px = String(precioEn(i));
+          return [fin - (n - 1 - k) * paso, px, px, px, px, '1000', 0, '1000000', 10, '500', '500000', '0'];
+        }),
+      };
+    };
+    try { return await fn(); } finally { globalThis.fetch = original; }
+  };
+
+  // Entrada 100, trailing 10%: con el pico en 130 el nivel queda en 117. El
+  // stop original está en 92 y NUNCA se toca — el precio no baja de 110.
+  const conTrail = {
+    asset: 'SOL', entrada: 100, limitePct: -8, objetivoPct: 300,
+    trailPct: 10, activarTrailEnPct: 10, politicaSalida: 'trailing', abierto: hace(6),
+  };
+  const rec = await conCamino(() => r(conTrail, 'cruzo-limite'))();
+  esperar(rec != null, 'tiene que reconstruir el cruce del trailing, no devolver null');
+  casiIgual(rec.precio, 117, 0.5,
+    `debe ejecutar en el nivel del trailing (130 × 0,9 = 117), no al precio del despertar; dio ${rec?.precio}`);
+
+  // La misma trayectoria SIN trailing no tiene nada que reconstruir: nunca bajó
+  // de 110 y su stop está en 92. Si devolviera algo, el camino nuevo estaría
+  // inventando cruces donde no los hay.
+  const sinTrail = { ...conTrail, trailPct: null, politicaSalida: null };
+  const nada = await conCamino(() => r(sinTrail, 'cruzo-limite'))();
+  esperar(nada === null, `sin trailing y sobre el stop no hay cruce; dio ${JSON.stringify(nada)}`);
+
+  // Y un trailing que exige más renta de la que hubo tampoco arma: con
+  // activación en +40% el pico de +30% no alcanza, y rige el stop original.
+  const exigente = { ...conTrail, activarTrailEnPct: 40 };
+  const tampoco = await conCamino(() => r(exigente, 'cruzo-limite'))();
+  esperar(tampoco === null,
+    `con el trailing sin armar rige el stop original y no hay cruce; dio ${JSON.stringify(tampoco)}`);
+});
+
 // --- correr ------------------------------------------------------------
 console.log(`\nTests de la matemática de dinero · sandbox ${sandbox}\n`);
 for (const c of casos) {

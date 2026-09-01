@@ -3638,3 +3638,77 @@ falla, y quitando la deduplicación al leer también. Los 12 candidatos del día
 quedaron registrados por el monitor; `/api/candidatos` responde con 0 medidos
 porque la ventana de 24 h todavía no pasó — a partir de mañana empieza a
 acumular sin arriesgar un peso.
+
+## 2026-09-01 (cont.) — La reconstrucción no seguía al trailing (v4c, `m-8d51a8b5`)
+
+Tres pendientes que quedaron abiertos al cerrar el bloque C, y uno de ellos le
+quitaba valor a la política recién adoptada.
+
+### 1 · La reconstrucción buscaba el stop original
+
+`reconstruirCruce` existe porque el monitor muere con el equipo dormido (79-91%
+del tiempo ciego en los días medidos): al despertar reconstruye desde velas de
+1 minuto cuándo se cruzó el nivel y ejecuta ahí, como habría hecho una OCO.
+
+Pero buscaba **siempre el stop original**. Con v4a el trailing es la salida
+principal, así que el caso más común dejó de reconstruirse: una posición con
+pico en +30% y trailing en +17% que de madrugada cae a +5% cruza su trailing,
+pero acá se buscaba el cruce de −8%, nunca se encontraba, y se vendía al precio
+del despertar. **Doce puntos porcentuales — justo la ventaja que la política
+venía a capturar.**
+
+La dificultad real: el nivel del trailing **no es fijo, sube con el pico**. Hay
+que recorrer las velas llevando el máximo y recalcular el nivel en cada minuto.
+Dos decisiones finas:
+
+· **El pico se DERIVA de las velas, no se siembra con `picoDesdeApertura`.** Ése
+  es el máximo de toda la vida de la posición; si se formó DESPUÉS del inicio de
+  la ventana, sembrar con él pondría el nivel demasiado arriba desde el primer
+  minuto y detectaría un cruce que en ese momento no existía — inventando una
+  venta a un precio que el mercado nunca disparó.
+· Para posiciones más viejas que la ventana de 24 h se pide el pico previo
+  (`picoAntesDe`), una llamada acotada y solo cuando hace falta.
+
+El test necesitó un mock propio: el Binance falso genera series PLANAS, y con
+ellas el pico nunca se forma. Un trailing solo se puede probar con un camino que
+suba primero. Verificado por mutación en sus dos sentidos — volver al nivel fijo
+falla, y armar el trailing ignorando su umbral también.
+
+### 2 · Telegram seguía mostrando lo que el dashboard ya no
+
+`/posiciones` mostraba `Límite (limitePct)` —el stop original, no el efectivo— y
+`Objetivo` como si fuera a vender ahí. Ahora muestra el nivel que de verdad
+ejecuta, etiqueta el techo como referencia bajo política de trailing, y avisa a
+qué renta se arma el trailing cuando todavía no armó.
+
+**Lo incómodo:** ayer escribí la lección de que cada superficie que muestra una
+regla empieza a mentir en el mismo commit, y la apliqué en UNA de las dos
+superficies. Escribir la lección no es aplicarla; hay que enumerar las
+superficies, no recordarlas.
+
+### 3 · Las hipótesis quedaron desalineadas por nuestro propio trabajo
+
+Cuatro cambiaron de estado sin que nadie las tocara:
+
+| hipótesis | antes | ahora |
+|---|---|---|
+| `objetivo-corta-temprano` | abierta | **confirmada** y actuada (v4a) |
+| `umbral-plazo-por-volatilidad` | abierta | **obsoleta**: el plazo salió de la política |
+| `plazo-libera-en-descuento` | abierta | **obsoleta**, con la contraevidencia de SUI del 28-ago por fin registrada |
+| `score-de-confianza` | abierta (inevaluable) | abierta y **por fin evaluable** |
+
+La de `score-de-confianza` ganó además una vía nueva: contrastar el score de los
+candidatos RECHAZADOS contra su resultado a 24/48 h es lo único que rompe el
+aplastamiento del rango de RSI (58-69) que produce la propia compuerta.
+
+### El mismo hueco del sello, POR TERCERA VEZ
+
+`reconstruirCruce` decide **a qué precio** se ejecuta una salida. Es una regla
+de dinero —vale 12 pp en el caso medido— y no estaba sellada. Van tres en un
+día: la política de salida, los criterios del screener, y ahora ésta.
+
+**Lección reforzada:** el sello cubre lo que alguien se acordó de agregar, y
+"acordarse" no es un mecanismo. La cobertura hay que derivarla de una
+enumeración de las decisiones del motor, no de la memoria de quien la revisa.
+Tres hallazgos seguidos en el mismo día no son mala suerte: son la prueba de que
+el método de auditarlo estaba mal.

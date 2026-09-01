@@ -2456,15 +2456,45 @@ export async function jugadaManual({ vender = [], comprar = [], nota, etiqueta, 
 
 const RECONSTRUCCION_MAX_H = 24;   // más atrás, las velas de 1m ya no están
 
+// El pico alcanzado ANTES de un instante dado. Hace falta para reconstruir un
+// trailing en posiciones más viejas que la ventana de reconstrucción: el máximo
+// que armó el nivel pudo formarse antes de la primera vela que se mira.
+//
+// No sirve usar `p.picoDesdeApertura` como semilla: ése es el máximo de TODA la
+// vida de la posición, y si el pico se hizo DESPUÉS del inicio de la ventana,
+// sembrar con él pondría el nivel de trailing demasiado arriba desde el primer
+// minuto y detectaría un cruce que en ese momento todavía no existía —
+// inventando una venta a un precio que el mercado nunca disparó.
+async function picoAntesDe(p, hasta) {
+  const desde = Date.parse(p.abierto);
+  if (hasta <= desde) return 0;
+  const horas = Math.ceil((hasta - desde) / 3_600_000) + 1;
+  const k = await pub('/api/v3/klines', {
+    symbol: `${p.asset}USDT`, interval: '1h',
+    startTime: desde, limit: Math.min(1000, Math.max(2, horas)),
+  });
+  const previas = k.filter(v => Number(v[0]) < hasta).map(v => parseFloat(v[2]));
+  return previas.length ? Math.max(...previas) : 0;
+}
+
 async function reconstruirCruce(p, senal) {
   const desde = Date.parse(p.plazoDesde ?? p.abierto);
   const inicio = Math.max(desde, Date.now() - RECONSTRUCCION_MAX_H * 3_600_000);
   const minutos = Math.ceil((Date.now() - inicio) / 60_000);
   if (minutos < 5) return null;   // sin hueco que reconstruir
 
-  const nivel = senal === 'cruzo-limite'
+  // NIVEL FIJO vs NIVEL MÓVIL. Hasta acá esto buscaba siempre el stop ORIGINAL,
+  // y con la política v4a —donde el trailing ES la salida principal— eso dejó
+  // de reconstruir el caso más común: una posición con pico en +30% y trailing
+  // en +17% que de madrugada cae a +5% cruzaba su trailing, pero acá se buscaba
+  // el cruce de −8%, nunca se encontraba, y se vendía al precio del despertar.
+  // Doce puntos perdidos, justo la ventaja que la política venía a capturar.
+  const conTrail = senal === 'cruzo-limite' && p.trailPct != null;
+  const nivelFijo = senal === 'cruzo-limite'
     ? p.entrada * (1 + p.limitePct / 100)
     : p.entrada * (1 + p.objetivoPct / 100);
+  const umbralArmado = p.activarTrailEnPct != null
+    ? p.entrada * (1 + p.activarTrailEnPct / 100) : 0;
 
   const velas = await pub('/api/v3/klines', {
     symbol: `${p.asset}USDT`, interval: '1m',
@@ -2472,19 +2502,32 @@ async function reconstruirCruce(p, senal) {
   });
   if (!velas.length) return null;
 
+  // El pico solo se pide si la ventana no cubre la vida entera de la posición.
+  let pico = conTrail && inicio > desde ? await picoAntesDe(p, inicio) : 0;
+
   for (const v of velas) {
     const alto = parseFloat(v[2]), bajo = parseFloat(v[3]);
+    // El nivel del trailing es el de ESTE minuto, con el pico acumulado hasta
+    // el minuto anterior: incorporar el máximo de la vela en curso y además
+    // cortar con su mínimo sería asumir que el alto vino primero.
+    let nivel = nivelFijo;
+    if (conTrail && pico >= umbralArmado && pico > 0) {
+      // solo aprieta, nunca ensancha: la misma regla que en evaluarNiveles
+      nivel = Math.max(nivelFijo, pico * (1 - p.trailPct / 100));
+    }
     const cruzo = senal === 'cruzo-limite' ? bajo <= nivel : alto >= nivel;
-    if (!cruzo) continue;
-    const cuando = Number(v[0]);
-    // Solo cuenta si el cruce fue ANTES de esta revisión con margen: si ocurrió
-    // recién, el precio de ahora ya es el correcto y no hay nada que corregir.
-    if (Date.now() - cuando < 4 * 60_000) return null;
-    return {
-      precio: nivel,                 // se ejecuta EN el nivel, no en la mecha
-      cuando: new Date(cuando).toISOString(),
-      minutosTarde: Math.round((Date.now() - cuando) / 60_000),
-    };
+    if (cruzo) {
+      const cuando = Number(v[0]);
+      // Solo cuenta si el cruce fue ANTES de esta revisión con margen: si
+      // ocurrió recién, el precio de ahora ya es el correcto.
+      if (Date.now() - cuando < 4 * 60_000) return null;
+      return {
+        precio: nivel,               // se ejecuta EN el nivel, no en la mecha
+        cuando: new Date(cuando).toISOString(),
+        minutosTarde: Math.round((Date.now() - cuando) / 60_000),
+      };
+    }
+    if (conTrail) pico = Math.max(pico, alto);
   }
   return null;
 }
@@ -3229,6 +3272,12 @@ function parametrosDelMotor() {
       sizing: huellaDeFuncion(montoPorRiesgo),
       compuerta: huellaDeFuncion(compuertaRiesgo),
       salida: huellaDeFuncion(evaluarNiveles),
+      // A QUÉ PRECIO se ejecuta una salida también es una decisión de dinero:
+      // reconstruir el cruce en su nivel o vender al precio del despertar
+      // difiere en 12 puntos porcentuales en el caso medido. Tercera vez que
+      // aparece el mismo hueco de cobertura el mismo día — ver la lección en
+      // BITACORA: la pregunta no es "¿el sello funciona?" sino "¿qué no mira?".
+      reconstruccion: huellaDeFuncion(reconstruirCruce),
     },
   };
 }
