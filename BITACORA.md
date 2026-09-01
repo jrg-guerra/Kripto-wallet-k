@@ -3274,3 +3274,367 @@ es del período, no una alarma — coincide con el giro de régimen de rally amp
 a caída amplia.
 
 **Lección:** un arreglo que depende de CÓMO se arranca el proceso no está completo si existe otra forma de arrancarlo — verificar que el mecanismo de logging sea inevitable (por ejemplo, dentro del propio server.mjs) en vez de depender de que siempre se invoque por el script correcto.
+
+## 2026-09-01 — Auditoría de engine.mjs: seis mecanismos con hueco (v3g, sello `m-cc3e9dcf`)
+
+Se auditó el archivo completo (3.156 líneas) contra los datos reales. Un bug
+que crasheaba y cinco controles con hueco — tres de ellos del tipo que ya
+conocemos: seguían diciendo OK sin controlar nada.
+
+1. **`aplicarPlan` crasheaba con la billetera migrada.** Filtraba las salidas
+   con `wallet.holdings[...]`, clave que la billetera migrada no tiene — y las
+   salidas viejas (ACE y SOL, cerradas el 19-ago) seguían vivas en el last-run
+   porque nadie más las podaba. El TypeError saltaba DESPUÉS de escribir la
+   billetera y los movimientos: estado a medio actualizar, el mismo patrón que
+   jugadaManual ya había corregido. Ahora filtra contra todos los bolsillos.
+2. **Carrera en la watchlist.** `evaluarWatchlist` leía el archivo, esperaba a
+   la red por cada entrada (segundos) y escribía lo leído — fuera del candado.
+   Una entrada agregada desde el dashboard en esa ventana desaparecía en
+   silencio. Ahora son dos fases: toda la red primero, y la lectura+escritura
+   después, síncrona — sin await en el medio nada puede intercalarse.
+3. **El corte de la rampa se disfrazaba de stop.** Con trailing y plazo vencido
+   a la vez, la señal salía `cruzo-limite` aunque el nivel que cortó fuera la
+   rampa del plazo: cierre por tiempo clasificado como stop → cuarentena
+   injusta. La señal ahora la pone el nivel que de verdad manda.
+4. **El tope de riesgo abierto (5%) no veía el propio lote.** Las compras
+   anteriores de una misma jugada aún no están en posiciones.json, así que se
+   sumaban en cero. La compuerta recibe ahora `riesgoExtraUSDT` acumulado.
+5. **La venta parcial cerraba la posición entera** en el registro: la mitad no
+   vendida quedaba en el sleeve sin stop ni vigilancia. Ahora reduce la
+   posición (`reducirPosicion`); solo la venta completa cierra.
+6. **El clamp silencioso neutralizaba un bloqueo.** `min(pedido, reserva)`
+   compraba menos de lo pedido sin avisar, y con el monto ya recortado el
+   bloqueo "reserva insuficiente" de la compuerta no podía dispararse nunca.
+   La compuerta juzga ahora el monto pedido; si no alcanza, la jugada rebota
+   entera con el motivo a la vista.
+
+Los seis con test verificado por mutación: 6/6 en rojo contra el motor
+anterior, 61/61 en verde con los arreglos.
+
+**Lección:** los tres controles muertos (2, 4 y 6) tenían la misma anatomía —
+el dato que el control necesitaba llegaba recortado, tarde o de otro archivo, y
+el control aprobaba con la mano vacía. Auditar un control no es leer su `if`:
+es perseguir de dónde viene cada operando hasta el disco o la red.
+
+## 2026-09-01 (cont.) — Bloque A: el replay de salidas, y el sello que no vigilaba la salida (v3h, `m-bd93867e`)
+
+Primer bloque del plan de evolución del motor. El objetivo no era hacerlo "más
+neuronal" sino contestar con números dónde está la fuga — y resultó estar donde
+nadie estaba mirando.
+
+### El diagnóstico que ordenó todo
+
+16 cierres, 72,73 USDT desplegados, +3,32 de resultado. Descompuesto por salida:
+las 5 jugadas que llegaron a objetivo aportaron +5,34 (+21,5%); las otras 11
+restaron. Y el seguimiento post-cierre midió que **salir temprano costó +3,48
+USDT — más que todo lo que el motor ganó**. Las comisiones, en cambio, suman
+0,19: no son el problema.
+
+Conclusión que reorienta el trabajo: la entrada no es el cuello de botella
+(acierto 50%, alfa +1,5% sobre BTC). **La salida sí.**
+
+### Paso 1 · El score se guardaba como frase, no como dato
+
+`score-de-confianza` pedía correlacionar score con resultado a partir de n≥20.
+Era **inejecutable por construcción**: el score solo existía embebido en el
+texto de la tesis ("score 74"), nunca como campo. Aunque llegaran 200 jugadas,
+la comprobación no habría podido correr. Es el mismo defecto que la auditoría
+encontró en tres controles: falta el operando, no la lógica.
+
+Arreglado: `contextoEntrada` ahora mide también fase y salto de volumen (de las
+MISMAS velas, sin llamadas nuevas — y verificado que da idéntico a
+`saltoVolumen()`), y `registrarDecision` guarda `score`, `desglose` y `senal`.
+Con `scoreOrigen` distinguiendo el score que **de verdad gateó** la entrada del
+reconstruido después: mezclarlos arruinaría el análisis que justifica el campo.
+
+### Paso 2 · El replay no reimplementa las reglas
+
+`replay-salidas.mjs` toma cada posición real y replaya políticas alternativas
+sobre las velas posteriores. Para no repetir la duplicación de siempre —dos
+copias de las reglas que deben coincidir sin que nada lo obligue— se extrajo
+`evaluarNiveles` como función pura y **el replay llama a la misma función que
+corre en producción**. El tiempo entra como parámetro; ese era el único lazo
+con el reloj.
+
+Validación honesta: replayar la política actual da +2,45 contra +3,32 real. La
+diferencia (−0,87) es el efecto NETO de haber ejecutado tarde — perjudicó los
+stops (ACE salió a −16% con stop en −12%) pero benefició a los ganadores, que
+se pasaron de largo su objetivo (HEMI cerró en +46% con objetivo en +30%). El
+saldo confirma la tesis: **el techo del objetivo cuesta más que el
+deslizamiento de los stops.**
+
+### Paso 3 · Las cinco políticas, medidas
+
+Resultado REALIZADO (excluyendo posiciones que no cerraron dentro del horizonte,
+porque valorizarlas a una fecha arbitraria premia a la política más paciente):
+
+| política | realizado | vs actual |
+|---|---|---|
+| Trailing 10% desde +10% | +3,16 | +40% |
+| Trailing 20% desde +10% | +3,10 | +37% (deja 4 abiertas) |
+| Objetivo +25% | +2,84 | +26% |
+| Actual sin plazo | +2,54 | +12% |
+| Actual | +2,26 | — |
+
+**Las cinco alternativas le ganan a la política vigente.** Esa dirección es
+robusta aunque los montos no lo sean con n=16.
+
+Trampa evitada: por TOTAL, el trailing 20% marcaba +8,25 y parecía triplicar a
+todo. El 62% de esa ventaja eran 4 posiciones sin cerrar, valorizadas 30 días
+después. El script elegía "la mejor" por ese número — se corrigió para que
+ordene por realizado. Un backtest que premia a la política que deja todo
+abierto mide paciencia, no rendimiento.
+
+Matiz que el detalle revela: el trailing 10% gana sobre todo **cortando
+perdedoras antes** (ACE +0,59, APT, FET, FIL), y PIERDE en las dos ganadoras
+grandes (TRUMP −1,18, HEMI −0,70). Es decir: funciona como mejor stop, no como
+mejor dejador-correr. No es la mecánica que se buscaba arreglar, así que la
+elección de política no queda cerrada por estos números.
+
+### El hueco que apareció de paso
+
+Verificando el sello después del refactor: **la lógica de salida no entraba en
+él por ningún lado**. Las huellas eran plan, sizing y compuerta. Cambiar el
+objetivo o el trailing —la mayor palanca que acabábamos de medir— habría dejado
+el sello quieto y las jugadas nuevas atribuidas al motor viejo. Se agregó
+`salida: huellaDeFuncion(evaluarNiveles)` y se verificó contra su modo de
+fallar: tocando un umbral de salida, el sello se mueve (`m-bd93867e` →
+`m-beb4631d`).
+
+**Lección:** el sello se diseñó para que ninguna regla cambie en silencio, pero
+solo vigilaba las funciones que existían el día que se escribió. Un mecanismo
+de vigilancia también tiene cobertura, y la suya no se revisa sola. La pregunta
+correcta no es "¿el sello funciona?" sino "¿qué NO está mirando?".
+
+Nota de higiene: la prueba de mutación del sello dejó registrado `m-beb4631d`
+en `versiones.json` — un sello que nunca operó. Lo detectó el test de sellos no
+declarados y se eliminó a mano. Experimentar contra el estado real deja rastro.
+
+### Paso 3 (ampliado) · El replay sobre 221 ventanas históricas
+
+Con n=16 no se podía elegir política, solo saber que había que cambiarla. Se
+agregó el modo `--historico`: genera entradas sintéticas sobre ~166 días y 40
+activos aplicando **los criterios reales del screener** (importa
+`detectarSenales`, `scoreSetup`, `CRITERIOS`, `planDeEntrada` de los módulos que
+operan — copiarlos habría medido salidas sobre las entradas de otro sistema).
+De 4.700 días-activo evaluados pasaron 221: el resto lo frenaron el régimen
+vetado (2.525), la falta de patrón reconocible (1.733) y el score (202).
+
+Resultado NETO de comisiones, por operación:
+
+| política | medio | mediana | acierto | horas | %/100h | sin top 5% |
+|---|---|---|---|---|---|---|
+| Actual | **−0,205%** | −1,26% | 42% | 38 | −0,534 | −1,123% |
+| Objetivo +25% | +0,326% | −1,26% | 41% | 47 | +0,697 | −0,843% |
+| Trailing 10% desde +10% | +0,482% | −1,20% | 41% | 50 | **+0,965** | −0,967% |
+| Trailing 20% desde +10% | +0,272% | −1,26% | 41% | 61 | +0,448 | −1,463% |
+| Actual sin plazo | +0,521% | −4,19% | 35% | 104 | +0,502 | −0,781% |
+| Trailing 10% sin plazo | **+0,968%** | −4,19% | 35% | 116 | +0,836 | **−0,720%** |
+
+**Hallazgo principal: la política de salida vigente pierde plata.** −0,205% por
+operación neto de comisiones, sobre 221 ventanas. No es que rinda poco: la
+comisión de ida y vuelta se come lo que la regla deja sobre la mesa. Las cinco
+alternativas son positivas.
+
+Dos correcciones que cambiaron la conclusión mientras se medía:
+
+1. **Los porcentajes estaban brutos.** Con la media de la política actual pegada
+   a cero, los 0,2% del ida y vuelta eran la diferencia entre "no gana nada" y
+   "pierde". Se pasó todo a neto (`pnlPctNeto`).
+2. **El cociente contra la actual daba múltiplos absurdos** (−139x) por dividir
+   por una media casi cero. Se eliminó: solo se muestran puntos porcentuales.
+
+### Lo que la prueba de robustez obliga a admitir
+
+**Quitando el 5% mejor, TODAS las políticas quedan negativas.** El borde entero
+—de las seis— vive en ~11 operaciones de 221. Eso no invalida el resultado: es
+el perfil normal de seguir tendencias, donde se pierde poco muchas veces y se
+gana mucho pocas. Pero sí obliga a leer la tabla distinto: **lo informativo es
+el ORDEN, no las magnitudes**, y con este n las medias son frágiles.
+
+El orden sí es estable. `Trailing 10% sin plazo` es la mejor con la media
+completa Y con la podada; `Trailing 20%` se revela como artefacto de un solo
+acierto (+133% su mejor operación, y la PEOR de todas al podar).
+
+### La métrica que reconcilia los dos conjuntos de datos
+
+Sobre las 16 posiciones reales ganó `Trailing 10% desde +10%`; sobre las 221
+ventanas gana `Trailing 10% sin plazo`. No se contradicen: miden cosas
+distintas. Por hora de capital comprometido, la de plazo rinde +0,965 %/100h
+contra +0,836 de la otra — retiene menos tiempo la plata.
+
+Cuál manda depende de cuál es el recurso escaso:
+  · Si sobran oportunidades y falta capital → gana la de plazo (más rotación).
+  · Si sobra capital y faltan entradas → gana la sin plazo (más por operación).
+
+**Hoy el sleeve va al 21% de su presupuesto: sobran 18,21 USDT sin desplegar.**
+El recurso escaso son las entradas, no la plata. Con eso, `Trailing 10% sin
+plazo` es la candidata — pero paga con una mediana de −4,19% y 35% de acierto:
+más rachas perdedoras seguidas, y capital retenido 5 días por jugada.
+
+**Lección:** medir en bruto lo que se cobra en neto invierte conclusiones cuando
+el efecto es del tamaño de la comisión. Y una media positiva sin la prueba del
+recorte no distingue una política de un golpe de suerte con formato de tabla.
+
+**Decisión pendiente (Bloque B):** adoptar `Trailing 10% sin plazo` exige que el
+motor sepa activar el trailing recién a partir de cierta renta —hoy `trailPct`
+rige desde la apertura— y que el plazo pase a ser opcional. Ninguna de las dos
+cosas está implementada: esto midió, no cambió nada.
+
+## 2026-09-01 (cont.) — v4a adoptada: trailing 10% armado en +10%, sin plazo (`m-a90cf77b`)
+
+Jorge eligió la política que midió mejor. Bloque B del plan de evolución.
+
+### Qué cambió
+
+La política de salida vigente pasa a ser: **trailing del 10% que se ARMA recién
+a partir de +10% de renta, sin plazo, y con el objetivo degradado a
+referencia**. Medida sobre 221 ventanas: +0,968% por operación neto de
+comisiones, contra −0,205% de la anterior. Es la mejor tanto con media completa
+como con media podada del 5% mejor.
+
+Lo que se paga por eso, y está medido: mediana −4,19% contra −1,26%, acierto 35%
+contra 42%, capital retenido 116 h contra 38. Se gana menos veces y se pierde
+más grande; el borde está en la cola.
+
+### Tres decisiones de diseño que no eran obvias
+
+**1. La activación del trailing es una regla, no un detalle.** Un trailing del
+10% puesto al abrir pone el stop en −10% desde el primer minuto: eso no es
+proteger ganancia, es un stop más estrecho — otra política, con otro resultado.
+El umbral (`activarTrailEnPct`) vive en `evaluarNiveles` y no en
+`refrescarPicos` porque el pico es un HECHO del mercado; lo que la activación
+decide es si ese hecho manda.
+
+**2. El objetivo no se borró: se degradó.** Sigue calculándose y guardándose
+porque es el numerador del R:B, que es un criterio de ENTRADA — la compuerta
+rechaza con R:B bajo 1,5. Borrarlo habría desarmado ese filtro sin que nada lo
+dijera. Ahora se mide si hay recorrido hasta la resistencia, y después se deja
+correr sin cobrar ahí.
+
+**3. La política se GRABA EN LA POSICIÓN, no se lee de una global.** Si se
+leyera global, adoptar v4a le habría cambiado las reglas a PUMP a mitad de
+vuelo: se abrió con objetivo +33% y trailing 25% desde la apertura, y esa es la
+apuesta que se hizo. Cambiarle el trato después corrompe justo lo que el sello
+existe para poder auditar. Las posiciones sin `politicaSalida` conservan el
+comportamiento anterior, y no se migran a propósito.
+
+### Dos paneles que habrían mentido
+
+Al terminar el motor quedaban dos superficies anunciando cosas que ya no iban a
+pasar:
+
+· El dashboard mostraba `objetivo X (+20%) · falta Y%` para posiciones que
+  nunca venderían ahí, y el stop original en vez del nivel que de verdad va a
+  ejecutar. Ahora muestra el límite EFECTIVO (el trailing cuando manda) y
+  etiqueta el techo como `referencia, no vende`.
+· `evaluarNiveles` marcaba `cerca-objetivo` a una posición en +50% con techo en
+  +10%. Se suprime bajo política de trailing: el estado que importa ahí es si
+  el trailing armó, y ese ya viaja en `trailActivo`.
+
+**Lección:** cambiar una regla de decisión no termina en el motor. Cada lugar
+que muestra o explica esa regla es un control que empieza a mentir en el mismo
+commit, y ninguno falla ruidosamente — siguen mostrando un número con toda
+confianza. Buscar las superficies es parte del cambio, no una tarea aparte.
+
+### El backtest también tenía que moverse
+
+`replay-salidas.mjs` construía sus entradas históricas con el plazo fijo a 24 h.
+Con la política nueva habría seguido comparando contra un "actual" que dejó de
+existir — el instrumento de medición desincronizado del sistema medido. Ahora
+las entradas nacen de `POLITICA_SALIDA`, la misma constante que usa el motor, y
+la política anterior quedó como variante nombrada (`pre-v4a`) para poder
+comprobar más adelante si el cambio valió la pena.
+
+También se explicitaron TODOS los campos de cada variante: heredar con
+`{...p, objetivoPct: 25}` habría arrastrado `politicaSalida: 'trailing'` y la
+variante "Objetivo +25%" no habría cortado nunca en su objetivo. Una prueba que
+dice una cosa y mide otra.
+
+### Verificación
+
+66 tests, tres mutaciones probadas: quitar la activación del trailing (2 rojos),
+hacer que el objetivo corte siempre (2 rojos), y dejar que la política global
+pise a las posiciones viejas (1 rojo). Sello nuevo `m-a90cf77b`, movido solo.
+
+Higiene: `m-10968d66` se registró entre dos ediciones y nunca operó — eliminado
+de `versiones.json`, como el `m-beb4631d` de la sesión anterior. Calcular el
+sello sobre el estado real deja rastro aunque el código no llegue a correr.
+
+### Lo que queda por ver
+
+Ninguna posición vive todavía bajo v4a: PUMP es anterior. La primera entrada
+nueva estrena la política, y hay dos cosas que mirar con datos y no con
+expectativa: si el capital se queda retenido más de lo tolerable sin plazo que
+lo libere, y si las rachas perdedoras (35% de acierto) se sostienen sin que la
+regla se abandone por incomodidad. La segunda es el riesgo real de esta
+política, y no es técnico.
+
+## 2026-09-01 (cont.) — Bloque C: el contrafactual, y el paso que resultó no hacer falta (v4b, `m-9ca711c2`)
+
+### Por qué el bloque quedó en un solo paso
+
+El plan tenía cuatro. Al llegar cambiaron de valor:
+
+· **Paso 7 (seguir a los rechazados) — hecho.** Captura datos que de otro modo
+  **se pierden para siempre**: nadie puede reconstruir después qué candidatos
+  evaluó el screener un martes ni por qué los descartó.
+· **Paso 6 (publicar el vector de estado) — descartado, no pospuesto.** Su dato
+  SÍ es reconstruible: PnL, horas, progreso, caída desde el pico, volatilidad,
+  fase y régimen salen todos de las velas, que es exactamente lo que hace
+  `replay-salidas.mjs`. Guardarlo en vivo sería una segunda copia de algo que
+  ya se puede derivar — y este proyecto ya sabe cómo terminan las segundas
+  copias. **El criterio no es "¿sirve el dato?" sino "¿se pierde si no lo
+  guardo ahora?".**
+· **Pasos 8 y 9 (política adaptativa) — bloqueados por falta de datos.** v4a se
+  adoptó hoy y ninguna posición corrió aún bajo ella. Construir una política
+  condicional encima de una fija que no produjo un solo dato es adivinar con
+  más maquinaria.
+
+### El contrafactual
+
+El screener evalúa ~12 candidatos por corrida y compra 0 o 1. Los otros
+desaparecían, así que el sistema solo podía aprender de sus 16 jugadas — con el
+RSI aplastado entre 58 y 69 **porque su propia compuerta no deja pasar otra
+cosa**. Un termómetro que solo mide entre 36 y 37 grados.
+
+Ahora cada candidato juzgado queda registrado en `data/candidatos.jsonl` con su
+contexto y —lo que importa— **el filtro que lo rechazó como etiqueta**, no solo
+como frase. El texto sirve para leerlo; la etiqueta sirve para agrupar cientos
+de casos y contestar la pregunta que hoy es incontestable: *cada filtro, ¿nos
+ahorra plata o nos la cuesta?* `seguimientoCandidatos()` mide desde velas qué
+hizo el precio a 24 y 48 h, con la misma maquinaria del seguimiento
+post-cierre, y agrega por filtro.
+
+**El veto de régimen era el caso más ciego.** Salía sin mirar un solo
+candidato: hoy 1-sep vetó los 12 y no habría quedado rastro de qué se dejó
+pasar. Ahora se registran desde el radar YA calculado — cero llamadas extra
+para medir lo que igual íbamos a descartar.
+
+Una observación por activo y por día: los criterios se calculan sobre velas
+diarias, así que registrar cada 3 minutos guardaría 480 copias del mismo juicio.
+El tope vive en memoria y la lectura deduplica por (activo, fecha), para que un
+reinicio no ensucie la serie.
+
+### El mismo hueco del sello, en otro sitio
+
+Revisando el sello después del cambio: **`CRITERIOS` no estaba adentro**. El
+veto de régimen, el techo de RSI 80, el máximo de salto de volumen — las reglas
+que hoy rechazaron los 12 candidatos— podían cambiar sin mover la versión.
+Es el mismo hallazgo que el de la política de salida, encontrado el mismo día en
+otro módulo. Agregado a `parametrosDeSenales` y verificado contra su modo de
+fallar: tocando `regimenesVetados`, el sello se mueve (`m-9ca711c2` →
+`m-4d4f1b26`).
+
+**Lección:** el sello se revisó una vez y pareció completo. No lo estaba, y no
+lo estuvo dos veces seguidas. Un mecanismo de vigilancia no se audita
+preguntando "¿funciona?" sino enumerando qué decisiones existen y cuáles de
+ellas mira — y esa lista crece cada vez que se agrega una regla.
+
+### Verificación
+
+67 tests. El del contrafactual verificado por mutación: quitando el tope diario
+falla, y quitando la deduplicación al leer también. Los 12 candidatos del día
+quedaron registrados por el monitor; `/api/candidatos` responde con 0 medidos
+porque la ventana de 24 h todavía no pasó — a partir de mañana empieza a
+acumular sin arriesgar un peso.

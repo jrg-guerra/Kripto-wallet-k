@@ -1485,6 +1485,316 @@ test('sin pico medido el trailing no inventa un nivel', async () => {
   esperar(sin.trailPct === null, 'y se puede desactivar');
 });
 
+// --- AUDITORÍA 2026-09-01: seis mecanismos con hueco -------------------------
+//
+// Cada prueba de acá abajo se verificó POR MUTACIÓN: corre en rojo contra el
+// código anterior al arreglo y en verde contra el actual. Una prueba que nace
+// en verde no prueba nada.
+
+test('un corte de la rampa del plazo no se disfraza de stop aunque haya trailing', () => {
+  const f = join(process.env.KW_DATA, 'posiciones.json');
+  motor._test.escribirJSON(f, { posiciones: [] });
+  const hace = h => new Date(Date.now() - h * 3_600_000).toISOString();
+  // Plazo de 24 h puesto hace 48: rampa completa, el nivel de salida ya subió a
+  // la banda de ruido (~+2,2% con vol 4). El trailing existe pero su nivel
+  // quedó en −12%: el que manda es el plazo, y la etiqueta lo tiene que decir —
+  // 'cruzo-limite' clasificaría el cierre como stop y mandaría a cuarentena
+  // una salida que fue por tiempo, no por precio.
+  const pos = motor.abrirPosicion({
+    asset: 'SOL', qty: 1, entrada: 100, objetivoPct: 30, limitePct: -10,
+    horizonteHoras: 24, volatilidadDiariaPct: 4, origen: 'test',
+  });
+  const data = JSON.parse(motor._test.fs.readFileSync(f, 'utf8'));
+  const p = data.posiciones.find(x => x.id === pos.id);
+  p.abierto = hace(48);
+  p.plazoDesde = hace(48);
+  p.trailPct = 20;
+  p.picoDesdeApertura = 110;   // trailing en −12%: por debajo de la rampa
+  motor._test.escribirJSON(f, data);
+
+  const ev = motor.evaluarPosiciones({ SOLUSDT: 101 }).find(x => x.id === pos.id);
+  esperar(ev.senal === 'vencido-sin-renta',
+    `cortó la rampa del plazo, no el trailing: la señal debe ser 'vencido-sin-renta', dio '${ev.senal}'`);
+
+  // y cuando el trailing SÍ es el nivel que manda, sigue cortando como stop
+  p.picoDesdeApertura = 150;   // trailing en +20%, por encima de la rampa
+  motor._test.escribirJSON(f, data);
+  const ev2 = motor.evaluarPosiciones({ SOLUSDT: 101 }).find(x => x.id === pos.id);
+  esperar(ev2.senal === 'cruzo-limite',
+    `con el trailing mandando (+20%), el corte sigue siendo stop; dio '${ev2.senal}'`);
+});
+
+test('vender la mitad REDUCE la posición; venderla toda la cierra', async () => {
+  const fPos = join(process.env.KW_DATA, 'posiciones.json');
+  motor._test.escribirJSON(fPos, { posiciones: [] });
+  const w = billetera({ ancla: { BTC: 0.0007 }, sleeve: { SOL: 0.2 }, reserva: 10 });
+  motor._test.escribirJSON(motor._test.WALLET_FILE, w);
+  const pos = motor.abrirPosicion({ asset: 'SOL', qty: 0.2, entrada: 100, objetivoPct: 20, limitePct: -8, origen: 'test' });
+
+  // 0,2 SOL a 100 valen 20 USDT; se venden 10 → la mitad. Antes esto marcaba la
+  // posición entera como cerrada y la otra mitad quedaba en el sleeve sin stop,
+  // sin trailing y sin vigilancia: dinero huérfano de todos los controles.
+  await sinRed({ SOLUSDT: 100 }, () => motor.jugadaManual({
+    vender: [{ asset: 'SOL', usdt: 10 }], etiqueta: 'test', origen: 'test' }));
+  let p = JSON.parse(motor._test.fs.readFileSync(fPos, 'utf8')).posiciones.find(x => x.id === pos.id);
+  esperar(p.estado === 'abierta', `tras vender la mitad, la posición debe seguir abierta (quedó '${p.estado}')`);
+  casiIgual(p.qty, 0.1, 0.001, 'y con la mitad del tamaño');
+
+  await sinRed({ SOLUSDT: 100 }, () => motor.jugadaManual({
+    vender: [{ asset: 'SOL' }], etiqueta: 'test', origen: 'test' }));
+  p = JSON.parse(motor._test.fs.readFileSync(fPos, 'utf8')).posiciones.find(x => x.id === pos.id);
+  esperar(p.estado === 'cerrada', `vender el total debe cerrarla (quedó '${p.estado}')`);
+});
+
+test('pedir más de lo que hay en reserva rebota en la compuerta, no compra menos en silencio', async () => {
+  motor._test.escribirJSON(join(process.env.KW_DATA, 'posiciones.json'), { posiciones: [] });
+  // BTC alto para que el drawdown no bloquee por su cuenta: lo que se prueba es
+  // EL MOTIVO del rechazo, no que algo rechace.
+  const w = billetera({ ancla: { BTC: 0.0014 }, reserva: 6 });
+  motor._test.escribirJSON(motor._test.WALLET_FILE, w);
+  let error = null;
+  await sinRed({ SOLUSDT: 100 }, async () => {
+    try {
+      // Antes: min(8, 6) compraba 6 sin avisar, y el bloqueo "reserva
+      // insuficiente" de la compuerta no podía dispararse nunca — un control
+      // que siempre decía OK.
+      await motor.jugadaManual({
+        comprar: [{ asset: 'SOL', usdt: 8, limitePct: -5, objetivoPct: 10, tesis: 'test' }],
+        etiqueta: 'test', origen: 'test',
+      });
+    } catch (e) { error = e; }
+  });
+  esperar(error?.codigo === 423 && /reserva insuficiente/i.test(error?.message ?? ''),
+    `debe bloquear con 'reserva insuficiente' (423); dio ${error?.codigo ?? 'sin error'}: ${error?.message ?? 'la jugada se ejecutó'}`);
+});
+
+test('el tope de riesgo abierto también cuenta las compras encoladas del mismo lote', () => {
+  motor._test.escribirJSON(join(process.env.KW_DATA, 'posiciones.json'), { posiciones: [] });
+  const w = billetera({ ancla: { BTC: 0.0014 }, reserva: 20 });
+  const prices = { BTCUSDT: 69000, SOLUSDT: 100 };
+  const plan = { montoUSDT: 5, limitePct: -10, objetivoPct: 20 };   // riesgo 0,50 USDT
+
+  const sola = motor.compuertaRiesgo(plan, prices, { wallet: w });
+  esperar(sola.pasa, `la compra sola debe pasar; bloqueó: ${sola.bloqueos.join(' · ')}`);
+
+  // Con 5,5 USDT ya arriesgados por las compras anteriores del lote (que aún no
+  // están en posiciones.json), la misma compra tiene que rebotar en el 5%.
+  const conLote = motor.compuertaRiesgo(plan, prices, { wallet: w, riesgoExtraUSDT: 5.5 });
+  esperar(!conLote.pasa && conLote.bloqueos.some(b => /riesgo abierto/.test(b)),
+    `con el lote a cuestas debe bloquear por el tope del 5%; dio: ${conLote.bloqueos.join(' · ') || 'pasó'}`);
+});
+
+test('una entrada agregada mientras la watchlist consulta la red no se pierde', async () => {
+  const fW = join(process.env.KW_DATA, 'watchlist.json');
+  motor._test.escribirJSON(fW, { entradas: [{
+    id: 'test-sol', asset: 'SOL', estado: 'vigilando',
+    creada: new Date().toISOString(),
+    vence: new Date(Date.now() + 86_400_000).toISOString(),
+    condicion: { rsiMax: 70, fasesOk: ['tendencia'] },
+    chequeos: 0, ultimoChequeo: null, ultimoEstadoCond: null,
+  }] });
+  // sin SOL en la billetera, o la evaluación lo cancelaría por "ya en cartera"
+  motor._test.escribirJSON(motor._test.WALLET_FILE, billetera({ ancla: { BTC: 0.0014 } }));
+
+  // El monitor evalúa (fase de red) y JUSTO en el medio el dashboard agrega
+  // otra entrada. Antes el monitor escribía la foto que había leído al empezar
+  // y la entrada nueva desaparecía en silencio.
+  const original = globalThis.fetch;
+  let inyectada = false;
+  globalThis.fetch = async url => {
+    if (!inyectada && String(url).includes('klines')) {
+      inyectada = true;
+      motor.agregarWatch({ asset: 'ETH', motivo: 'agregada en plena evaluación', origen: 'test' });
+    }
+    return { ok: true, status: 200, json: async () => respuestaFalsa(String(url), { SOLUSDT: 85 }), text: async () => '' };
+  };
+  try { await motor.evaluarWatchlist({ tipo: 'sano' }); }
+  finally { globalThis.fetch = original; }
+
+  esperar(inyectada, 'la prueba tiene que haber inyectado la entrada durante la fase de red');
+  const eth = motor.watchlist().find(x => x.asset === 'ETH');
+  esperar(eth?.estado === 'vigilando',
+    `la entrada agregada durante la evaluación debe sobrevivir (quedó ${eth?.estado ?? 'BORRADA'})`);
+});
+
+test('aplicar el plan sobrevive a la billetera migrada y poda las salidas viejas', async () => {
+  motor._test.escribirJSON(join(process.env.KW_DATA, 'posiciones.json'), { posiciones: [] });
+  // como la real: bolsillos y nada más — la clave `holdings` no existe.
+  // `wallet.holdings[...]` reventaba acá DESPUÉS de escribir la billetera y los
+  // movimientos: el estado quedaba a medio actualizar.
+  const w = billetera({ ancla: { BTC: 0.0014 }, reserva: 20 });
+  motor._test.escribirJSON(motor._test.WALLET_FILE, w);
+  const fLR = join(process.env.KW_DATA, 'last-run.json');
+  const previo = JSON.parse(motor._test.fs.readFileSync(fLR, 'utf8'));
+  motor._test.escribirJSON(fLR, {
+    ...previo, picks: ['SOL'], ranuras: 1, propuesta: { avisos: [] },
+    // ACE se cerró hace días y no está en ningún bolsillo: su fila es basura
+    // que nadie podaba (seguía viva desde el 19-ago en el last-run real)
+    salidas: [{ asset: 'ACE', objetivoPct: 25, limitePct: -12 }, { asset: 'SOL', objetivoPct: 6, limitePct: -4 }],
+  });
+
+  const r = await sinRed({ SOLUSDT: 100 }, () => motor.aplicarPlan());
+  esperar(r.salidas.every(s => s.asset !== 'ACE'), 'la salida de un activo que ya no se tiene debe podarse');
+  esperar(r.salidas.some(s => s.asset === 'SOL'), 'y la del activo recién comprado debe quedarse');
+});
+
+// --- LA BASE DEL REPLAY DE SALIDAS -------------------------------------------
+//
+// `replay-salidas.mjs` mide políticas alternativas llamando a `evaluarNiveles`,
+// la MISMA función que el motor corre en producción. Eso vale solo si el tiempo
+// entra como parámetro y no como lectura del reloj: si `evaluarNiveles` mirara
+// `Date.now()` por dentro, el replay estaría midiendo todas las horas del
+// pasado como si fueran ahora, y la rampa del plazo nunca aparecería.
+test('los niveles dependen del tiempo dado, no del reloj', () => {
+  const p = {
+    asset: 'SOL', entrada: 100, objetivoPct: 30, limitePct: -10,
+    horizonteHoras: 24, volatilidadDiariaPct: 4,
+  };
+  // antes de vencer: manda el stop original, sin rampa
+  const joven = motor.evaluarNiveles(p, 100, 1);
+  casiIgual(joven.limitePctEfectivo, -10, 0.01, `sin vencer el plazo el límite es el original; dio ${joven.limitePctEfectivo}`);
+  esperar(joven.rampaPlazo === 0, 'y la rampa está en cero');
+
+  // recién vencido: la rampa arranca en cero, el nivel sigue siendo el original
+  const justo = motor.evaluarNiveles(p, 100, 24);
+  casiIgual(justo.limitePctEfectivo, -10, 0.01, `al vencer, la rampa arranca en el nivel original; dio ${justo.limitePctEfectivo}`);
+
+  // al doble del plazo: rampa completa, el nivel llegó a la banda de ruido
+  const viejo = motor.evaluarNiveles(p, 100, 48);
+  esperar(viejo.rampaPlazo === 1, `al doble del plazo la rampa está completa; dio ${viejo.rampaPlazo}`);
+  esperar(viejo.limitePctEfectivo > -10 && viejo.limitePctEfectivo > 0,
+    `y el límite subió hasta la banda de ruido (comisión + medio día de volatilidad); dio ${viejo.limitePctEfectivo}`);
+
+  // A mitad de camino tiene que estar en el PUNTO MEDIO exacto entre el stop
+  // original y el destino: es una rampa lineal, no un escalón con disfraz.
+  const medio = motor.evaluarNiveles(p, 100, 36);
+  casiIgual(medio.limitePctEfectivo, (-10 + viejo.limitePctEfectivo) / 2, 0.01,
+    `a mitad de rampa el nivel es el punto medio; dio ${medio.limitePctEfectivo}`);
+
+  // y la propiedad que hace válido el replay: mismo estado y misma hora, misma
+  // respuesta, sin importar cuándo se pregunte
+  const otraVez = motor.evaluarNiveles(p, 100, 36);
+  esperar(otraVez.limitePctEfectivo === medio.limitePctEfectivo && otraVez.senal === medio.senal,
+    'la función tiene que ser pura: mismos argumentos, mismo resultado');
+});
+
+// --- POLÍTICA DE SALIDA v4a: TRAILING ARMADO, SIN PLAZO ----------------------
+//
+// Adoptada tras medir 221 ventanas: la anterior (objetivo fijo + plazo 24 h)
+// perdía -0,205% por operación neta de comisiones.
+
+test('el trailing no rige hasta alcanzar su renta de activación', () => {
+  const f = join(process.env.KW_DATA, 'posiciones.json');
+  motor._test.escribirJSON(f, { posiciones: [] });
+  const p = {
+    entrada: 100, objetivoPct: 20, limitePct: -8,
+    trailPct: 10, activarTrailEnPct: 10, politicaSalida: 'trailing',
+  };
+
+  // Pico en +5%: NO alcanza el umbral de activación. Sin esta regla, el
+  // trailing del 10% pondría el stop en 104,5 x 0,9 = -5,9% desde el primer
+  // momento — un stop más estrecho disfrazado de protección de ganancia, que
+  // es OTRA política y da otro resultado.
+  const flojo = motor.evaluarNiveles({ ...p, picoDesdeApertura: 105 }, 100, 0);
+  casiIgual(flojo.limitePctEfectivo, -8, 0.01,
+    `con el pico bajo el umbral manda el stop original; dio ${flojo.limitePctEfectivo}`);
+  esperar(!flojo.trailActivo, 'y el trailing debe declararse inactivo');
+
+  // Pico en +12%: ya armó. El nivel pasa a 112 x 0,9 = 100,8 → +0,8%
+  const armado = motor.evaluarNiveles({ ...p, picoDesdeApertura: 112 }, 105, 0);
+  casiIgual(armado.limitePctEfectivo, 0.8, 0.01,
+    `armado, el trailing manda desde el pico; dio ${armado.limitePctEfectivo}`);
+  esperar(armado.trailActivo, 'y debe declararse activo');
+
+  // y corta como stop cuando el precio lo cruza
+  const cortado = motor.evaluarNiveles({ ...p, picoDesdeApertura: 112 }, 100.5, 0);
+  esperar(cortado.senal === 'cruzo-limite', `al cruzar el trailing sale como stop; dio '${cortado.senal}'`);
+});
+
+test('con política de trailing el objetivo ya no vende, pero sigue midiendo el R:B', () => {
+  const p = {
+    entrada: 100, objetivoPct: 20, limitePct: -8,
+    trailPct: 10, activarTrailEnPct: 10, politicaSalida: 'trailing',
+  };
+  // +25%: muy por encima del objetivo de +20%. La política anterior habría
+  // cobrado ahí; ésta deja correr, que es exactamente el punto.
+  const arriba = motor.evaluarNiveles({ ...p, picoDesdeApertura: 125 }, 125, 0);
+  esperar(arriba.senal !== 'cruzo-objetivo',
+    `el objetivo no puede cortar bajo política de trailing; dio '${arriba.senal}'`);
+  // pero el nivel sigue existiendo: es el numerador del R:B que filtra entradas
+  casiIgual(arriba.objetivo, 120, 0.01, 'el objetivo se conserva como referencia');
+
+  // y una posición SIN esa política mantiene el comportamiento de siempre
+  const vieja = motor.evaluarNiveles({ entrada: 100, objetivoPct: 20, limitePct: -8 }, 125, 0);
+  esperar(vieja.senal === 'cruzo-objetivo',
+    `sin política declarada el objetivo sigue cortando; dio '${vieja.senal}'`);
+
+  // Tampoco puede decir "cerca del objetivo": anunciaría un cobro que no ocurre.
+  // El pico va bajo el umbral para aislar el caso del corte por trailing.
+  const lejos = motor.evaluarNiveles({ ...p, picoDesdeApertura: 0 }, 118, 0);
+  esperar(lejos.senal !== 'cerca-objetivo',
+    `bajo trailing no existe "cerca del objetivo"; dio '${lejos.senal}'`);
+});
+
+test('adoptar la política nueva no cambia las reglas de una posición ya abierta', () => {
+  const f = join(process.env.KW_DATA, 'posiciones.json');
+  motor._test.escribirJSON(f, { posiciones: [] });
+  // Como PUMP: abierta con objetivo +33% y trailing desde la apertura, sin
+  // umbral de activación. Cambiarle el trato a mitad de vuelo corrompería lo
+  // que el sello de versión existe para poder auditar.
+  const vieja = motor.abrirPosicion({
+    asset: 'SOL', qty: 1, entrada: 100, objetivoPct: 33, limitePct: -13, origen: 'test',
+  });
+  motor.fijarTrailing([vieja.id], 25);
+  const ev = motor.evaluarPosiciones({ SOLUSDT: 134 }).find(x => x.id === vieja.id);
+  esperar(ev.senal === 'cruzo-objetivo',
+    `una posición anterior debe seguir cobrando en su objetivo; dio '${ev.senal}'`);
+});
+
+test('la política vigente entra al sello del motor', async () => {
+  const params = JSON.parse(JSON.stringify(motor._test?.parametros ?? {}));
+  // no hay acceso directo a los parámetros: se comprueba por su efecto, que es
+  // lo que de verdad importa — que el sello cambie si la política cambia.
+  const antes = await motor.versionMotor();
+  esperar(typeof antes === 'string' && antes.startsWith('m-'), 'el sello se calcula');
+  esperar(motor.POLITICA_SALIDA.politicaSalida === 'trailing'
+    && motor.POLITICA_SALIDA.trailPct === 10
+    && motor.POLITICA_SALIDA.activarTrailEnPct === 10
+    && motor.POLITICA_SALIDA.horizonteHoras === null,
+    'la política vigente es trailing 10% desde +10%, sin plazo');
+});
+
+// --- CONTRAFACTUAL: LO QUE NO COMPRAMOS TAMBIÉN ES DATO ----------------------
+//
+// El screener evalúa ~12 candidatos y compra 0 o 1. Sin registrar los
+// rechazados, el sistema solo aprende de sus 16 jugadas, con el RSI aplastado
+// entre 58 y 69 porque la compuerta no deja pasar otra cosa.
+test('cada candidato juzgado se registra una sola vez por día', async () => {
+  const a = await import('./aprendizaje.mjs');
+  const f = join(process.env.KW_DATA, 'candidatos.jsonl');
+  motor._test.fs.writeFileSync(f, '');
+
+  const base = { precio: 100, veredicto: 'rechazado', motivo: 'prueba', filtro: 'score', regimen: 'mixto' };
+  esperar(a.registrarCandidato({ ...base, asset: 'AAA' }) != null, 'el primero se registra');
+  esperar(a.registrarCandidato({ ...base, asset: 'BBB' }) != null, 'otro activo también');
+  // El mismo activo el mismo día es el MISMO juicio: los criterios salen de
+  // velas diarias, así que registrarlo cada 3 min guardaría 480 copias.
+  esperar(a.registrarCandidato({ ...base, asset: 'AAA' }) === null,
+    'repetir el mismo activo el mismo día no puede registrar de nuevo');
+
+  const leidos = a.leerCandidatos();
+  esperar(leidos.length === 2, `deben quedar 2 registros, hay ${leidos.length}`);
+  esperar(leidos.every(x => x.fecha && x.ts && x.filtro), 'cada registro lleva fecha, hora y el filtro que lo rechazó');
+
+  // Y la deduplicación tiene que sobrevivir a un reinicio: el tope vive en
+  // memoria, así que un proceso nuevo puede escribir el duplicado igual.
+  motor._test.fs.writeFileSync(f,
+    motor._test.fs.readFileSync(f, 'utf8') +
+    JSON.stringify({ ts: new Date().toISOString(), fecha: leidos[0].fecha, ...base, asset: 'AAA' }) + '\n');
+  esperar(a.leerCandidatos().length === 2,
+    'al leer, un duplicado de (activo, fecha) no puede contarse dos veces');
+});
+
 // --- correr ------------------------------------------------------------
 console.log(`\nTests de la matemática de dinero · sandbox ${sandbox}\n`);
 for (const c of casos) {

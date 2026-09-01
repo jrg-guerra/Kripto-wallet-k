@@ -295,27 +295,23 @@ export function condicionCumplida(condicion, ctx) {
 // Evalúa las vigilantes contra el mercado real. NO arma nada por sí misma:
 // devuelve las que están listas y quien llama crea la oferta — si esa creación
 // falla (p. ej. congelado), la entrada sigue vigilando y se reintenta.
+//
+// DOS FASES a propósito. La fase de red tarda segundos (velas por cada
+// vigilada) y este archivo también lo escriben el dashboard y Telegram
+// (agregar/cancelar) fuera del candado de vigilancia: leer, esperar la red y
+// escribir lo leído pisaba cualquier entrada agregada en el medio — la entrada
+// desaparecía en silencio. Ahora toda la red ocurre ANTES de leer el estado
+// que se va a escribir; la fase de estado no tiene ningún await, y sin await
+// nada puede intercalarse en ella.
 export async function evaluarWatchlist(regimen) {
-  const data = leerWatch();
-  let cambio = caducarWatch(data);
-  const listas = [];
-
-  const w4 = loadWallet(null) ?? {};
-  const enCartera = a => BOLSILLOS.some(b => (w4[b] ?? {})[a] > 0);
-
-  for (const w of data.entradas.filter(x => x.estado === 'vigilando')) {
+  // FASE 1 · red: medir el contexto de cada vigilada, sin tocar el archivo.
+  const vigilando = leerWatch().entradas.filter(x => x.estado === 'vigilando');
+  const ctxPorId = new Map();
+  for (const w of vigilando) {
     try {
-      if (enCartera(w.asset)) {
-        w.estado = 'cancelada';
-        w.resueltaEn = new Date().toISOString();
-        w.canceladaPor = 'motor';
-        w.motivoCancelacion = 'el activo ya está en la cartera';
-        cambio = true;
-        continue;
-      }
       const velas = await pub('/api/v3/klines', { symbol: `${w.asset}USDT`, interval: '1d', limit: 31 });
       const cierres = velas.map(k => parseFloat(k[4]));
-      const ctx = {
+      ctxPorId.set(w.id, {
         rsi14d: rsi(cierres),
         fase: clasificarTendencia(cierres)?.estado ?? null,
         regimen: regimen?.tipo ?? null,
@@ -328,16 +324,38 @@ export async function evaluarWatchlist(regimen) {
         // condición estaría esperando un número distinto del que después
         // decide el tamaño de la posición.
         volDiariaPct: volatilidadDiaria(cierres.slice(-15)),
-      };
-      const r = condicionCumplida(w.condicion, ctx);
-      w.chequeos = (w.chequeos ?? 0) + 1;
-      w.ultimoChequeo = new Date().toISOString();
-      w.ultimoEstadoCond = r.ok ? 'cumplida' : r.faltas;
-      cambio = true;
-      if (r.ok) listas.push({ ...w });
+      });
     } catch (e) {
       console.error(`watchlist ${w.asset}: ${e.message}`);
     }
+  }
+
+  // FASE 2 · estado: releer y aplicar, sin ningún await en el medio.
+  const data = leerWatch();
+  let cambio = caducarWatch(data);
+  const listas = [];
+
+  const w4 = loadWallet(null) ?? {};
+  const enCartera = a => BOLSILLOS.some(b => (w4[b] ?? {})[a] > 0);
+
+  for (const w of data.entradas.filter(x => x.estado === 'vigilando')) {
+    if (enCartera(w.asset)) {
+      w.estado = 'cancelada';
+      w.resueltaEn = new Date().toISOString();
+      w.canceladaPor = 'motor';
+      w.motivoCancelacion = 'el activo ya está en la cartera';
+      cambio = true;
+      continue;
+    }
+    // agregada durante la fase de red, o sin velas: la mide el próximo ciclo
+    const ctx = ctxPorId.get(w.id);
+    if (!ctx) continue;
+    const r = condicionCumplida(w.condicion, ctx);
+    w.chequeos = (w.chequeos ?? 0) + 1;
+    w.ultimoChequeo = new Date().toISOString();
+    w.ultimoEstadoCond = r.ok ? 'cumplida' : r.faltas;
+    cambio = true;
+    if (r.ok) listas.push({ ...w });
   }
 
   if (cambio) escribirWatch(data);
@@ -534,6 +552,10 @@ export async function tomarOferta(id, origen = 'dashboard') {
       // la invalidación viaja con la oferta: se midió al proponerla, y volver a
       // calcularla al aprobar daría otro número con el mercado ya movido
       invalidacionPct: o.contexto?.invalidacionPct ?? null,
+      // El score que DE VERDAD gateó esta entrada, no uno reconstruido después:
+      // viaja con la oferta desde el screening que la creó.
+      score: o.contexto?.score ?? null,
+      senal: o.contexto?.senal ?? null,
       tesis: `Oferta aprobada desde ${origen}. RSI14 ${o.contexto.rsi14d ?? '—'}, régimen ${o.contexto.regimen ?? '—'}.`,
     }],
     etiqueta: `oferta aprobada (${o.asset})`,
@@ -1229,11 +1251,21 @@ function writePosiciones(data) {
   escribirJSON(POSICIONES_FILE, data);
 }
 
-export function abrirPosicion({ asset, qty, entrada, objetivoPct, limitePct, horizonte, horizonteHoras, volatilidadDiariaPct, origen, version = null, invalidacionPct = null }) {
+export function abrirPosicion({ asset, qty, entrada, objetivoPct, limitePct, horizonte, horizonteHoras, volatilidadDiariaPct, origen, version = null, invalidacionPct = null, politicaSalida = null, trailPct = null, activarTrailEnPct = null }) {
   const data = readPosiciones();
   data.posiciones.push({
     id: `pos-${String(data.posiciones.length + 1).padStart(4, '0')}`,
     asset, qty, entrada, objetivoPct, limitePct,
+    // La política de salida se GRABA EN LA POSICIÓN, no se lee de una constante
+    // global al evaluar. Si se leyera global, adoptar una política nueva
+    // cambiaría las reglas de las posiciones ya abiertas a mitad de vuelo:
+    // PUMP se abrió con objetivo +33% y trailing 25% desde la apertura, y esa
+    // es la apuesta que se hizo. Cambiarle el trato después corrompe justo lo
+    // que el sello de versión existe para poder auditar.
+    //
+    // Ausente = comportamiento anterior (el objetivo corta). Las posiciones
+    // viejas no se migran a propósito.
+    politicaSalida, trailPct, activarTrailEnPct,
     // Qué motor tomó esta decisión. Sin esto, comparar la jugada 3 con la 11
     // es comparar dos sistemas distintos creyendo que es uno solo.
     version,
@@ -1305,6 +1337,34 @@ export function cerrarPosicion(asset, motivo, precioSalida) {
   return cerrada;
 }
 
+// Venta PARCIAL: la posición sigue viva con menos tamaño. Cerrarla entera —lo
+// que pasaba antes— dejaba el resto de las monedas en el sleeve sin stop, sin
+// trailing y sin vigilancia: dinero huérfano de todos los controles. La
+// reducción va de la posición más vieja a la más nueva; si a una la venta se la
+// lleva completa, esa sí se cierra con su PnL.
+function reducirPosicion(asset, qtyVendida, precio) {
+  const data = readPosiciones();
+  let resta = qtyVendida;
+  let cambio = false;
+  for (const p of data.posiciones) {
+    if (p.asset !== asset || p.estado !== 'abierta' || resta <= 0) continue;
+    const toma = Math.min(p.qty, resta);
+    resta -= toma;
+    // tolerancia de redondeo: vender el 99,9% de la posición es venderla toda
+    if (toma >= p.qty * 0.999) {
+      p.estado = 'cerrada';
+      p.cerrado = new Date().toISOString();
+      p.motivoCierre = 'jugada manual';
+      p.precioSalida = precio;
+      p.pnlPct = (precio / p.entrada - 1) * 100;
+    } else {
+      p.qty -= toma;
+    }
+    cambio = true;
+  }
+  if (cambio) writePosiciones(data);
+}
+
 // Volatilidad diaria de una posición. Las nuevas la guardan al abrirse; las
 // anteriores se recuperan del `limitePct`, que se fijó como 1,5x la
 // volatilidad (error medido < 0,4 pp en APT/FET/FIL). Sin red y sin migración.
@@ -1321,6 +1381,116 @@ function umbralPlazoPct(p) {
   return comisionIdaVuelta + BANDA_RUIDO_VOL * (vol ?? 0);
 }
 
+// POLÍTICA DE SALIDA VIGENTE — v4a, adoptada el 2026-09-01.
+//
+// Medida sobre 221 ventanas históricas (`replay-salidas.mjs --historico`) y
+// sobre las 16 posiciones reales. La política anterior —objetivo fijo + plazo
+// de 24 h— rendía **-0,205% por operación NETO de comisiones**: no es que
+// rindiera poco, es que perdía plata. Esta rinde +0,968%, la mejor de las seis
+// probadas tanto con la media completa como con la media podada del 5% mejor
+// (la prueba que desenmascaró al trailing del 20%, que era un solo acierto).
+//
+// LO QUE SE PAGA POR ESA VENTAJA, y está medido: mediana -4,19% contra -1,26%,
+// acierto 35% contra 42%, y capital retenido 116 h contra 38. Se gana menos
+// veces, se pierde más grande cuando se pierde, y la plata queda inmovilizada
+// tres veces más. Es rentable en promedio, no cómodo de mirar.
+//
+// Una sola declaración porque la lee el motor Y su propio backtest: si la
+// política cambiara acá y no allá, el replay compararía contra un "actual" que
+// ya no existe — la duplicación de siempre, esta vez en el instrumento de
+// medición.
+export const POLITICA_SALIDA = {
+  politicaSalida: 'trailing',
+  trailPct: 10,
+  activarTrailEnPct: 10,
+  // Sin plazo: el reloj deja de cortar. El plazo recortaba las pérdidas
+  // (mediana -1,26% contra -4,19%) pero cobraba esa protección con el borde
+  // entero — quitarlo vale +0,726 pp por operación.
+  horizonteHoras: null,
+};
+
+// NIVELES Y SEÑAL DE UNA POSICIÓN — parte PURA, sin reloj ni disco.
+//
+// Se extrajo de `evaluarPosiciones` para que el replay de políticas de salida
+// (`src/replay-salidas.mjs`) mida EXACTAMENTE las reglas que el motor ejecuta.
+// Reimplementarlas allá habría sido la duplicación de siempre: dos copias que
+// tienen que coincidir sin que nada lo obligue, y un backtest que valida un
+// sistema que no es el que opera.
+//
+// `horasDePlazo` entra como dato en vez de leerse del reloj: es lo único que
+// ataba este cálculo al presente, y es justo lo que un replay necesita mover.
+export function evaluarNiveles(p, precio, horasDePlazo) {
+  const objetivo = p.entrada * (1 + p.objetivoPct / 100);
+  const limite = p.entrada * (1 + p.limitePct / 100);
+  const pnlPct = (precio / p.entrada - 1) * 100;
+  // progreso: 0 = pegado al límite, 1 = pegado al objetivo
+  const progreso = Math.max(0, Math.min(1, (precio - limite) / (objetivo - limite)));
+  const vencida = p.horizonteHoras != null && horasDePlazo >= p.horizonteHoras;
+
+  // PLAZO PROGRESIVO (ver la nota extensa en el llamador original).
+  const destinoPlazoPct = p.horizonteHoras != null ? umbralPlazoPct(p) : null;
+  const rampa = vencida
+    ? Math.min(1, (horasDePlazo - p.horizonteHoras) / p.horizonteHoras) : 0;
+  const porPlazoPct = vencida
+    ? p.limitePct + (destinoPlazoPct - p.limitePct) * rampa
+    : p.limitePct;
+
+  // TRAILING desde el PICO. Solo APRIETA.
+  //
+  // `activarTrailEnPct` es la ARMADURA del trailing: mientras la posición no
+  // haya alcanzado esa renta, el trailing no rige. Sin esto, un trailing del
+  // 10% puesto al abrir pone el stop en -10% desde el primer minuto y deja de
+  // ser una protección de ganancia para volverse un stop más estrecho — que es
+  // otra regla, con otro resultado. El replay midió la versión ARMADA (10%
+  // desde +10%), así que el motor tiene que implementar esa y no su parecida.
+  //
+  // El pico se sigue midiendo siempre (es un hecho del mercado); lo que la
+  // activación decide es si ese hecho manda o no. Por eso el umbral vive acá y
+  // no en `refrescarPicos`.
+  const trailArmado = p.trailPct != null && p.picoDesdeApertura > 0
+    && (p.activarTrailEnPct == null
+      || p.picoDesdeApertura >= p.entrada * (1 + p.activarTrailEnPct / 100));
+  const porTrailPct = trailArmado
+    ? (p.picoDesdeApertura * (1 - p.trailPct / 100) / p.entrada - 1) * 100
+    : null;
+
+  const limitePctEfectivo = porTrailPct != null
+    ? Math.max(porPlazoPct, porTrailPct) : porPlazoPct;
+  const limiteEfectivo = p.entrada * (1 + limitePctEfectivo / 100);
+
+  // Con política de trailing el objetivo deja de ser una SALIDA y pasa a ser
+  // solo referencia. Sigue existiendo porque es el numerador del R:B, que es un
+  // criterio de ENTRADA: se mide si hay recorrido hasta la resistencia, y
+  // después se deja correr sin cobrar ahí. Quitarlo del todo habría desarmado
+  // la compuerta, que rechaza entradas con R:B bajo 1,5.
+  const objetivoCorta = p.politicaSalida !== 'trailing';
+
+  let senal = 'ok';
+  if (objetivoCorta && precio >= objetivo) senal = 'cruzo-objetivo';
+  else if (precio <= limite) senal = 'cruzo-limite';
+  // el trailing corta como un stop cuando ES el nivel que manda
+  else if (porTrailPct != null && porTrailPct > porPlazoPct && precio <= limiteEfectivo) senal = 'cruzo-limite';
+  // Por encima del stop original pero debajo del apretado por el plazo: la
+  // tesis no falló, se le acabó el tiempo.
+  else if (vencida && precio <= limiteEfectivo) senal = 'vencido-sin-renta';
+  // 'cerca-objetivo' solo tiene sentido si el objetivo VENDE. Bajo política de
+  // trailing una posición en +50% con techo de referencia en +10% quedaba
+  // etiquetada "cerca del objetivo": un panel anunciando un cobro que no va a
+  // ocurrir. El estado que importa ahí es si el trailing ya armó, y ese viaja
+  // en `trailActivo`.
+  else if (objetivoCorta && pnlPct >= p.objetivoPct * 0.7) senal = 'cerca-objetivo';
+  else if (pnlPct <= p.limitePct * 0.7) senal = 'cerca-limite';
+
+  return {
+    objetivo, limite, pnlPct, progreso, senal, vencida,
+    limitePctEfectivo: Number(limitePctEfectivo.toFixed(2)),
+    limiteEfectivo,
+    trailActivo: porTrailPct != null && limitePctEfectivo > porPlazoPct,
+    rampaPlazo: Number(rampa.toFixed(2)),
+    umbralPlazoPct: destinoPlazoPct,
+  };
+}
+
 // Evalúa cada posición abierta contra sus niveles. Devuelve el estado completo
 // para el dashboard y las señales de cruce para las alertas.
 export function evaluarPosiciones(prices) {
@@ -1329,73 +1499,22 @@ export function evaluarPosiciones(prices) {
     .map(p => {
       const precio = prices[`${p.asset}USDT`];
       if (!precio) return { ...p, sinPrecio: true };
-      const objetivo = p.entrada * (1 + p.objetivoPct / 100);
-      const limite = p.entrada * (1 + p.limitePct / 100);
-      const pnlPct = (precio / p.entrada - 1) * 100;
-      // progreso: 0 = pegado al límite, 1 = pegado al objetivo
-      const progreso = Math.max(0, Math.min(1, (precio - limite) / (objetivo - limite)));
       const horasAbierta = (Date.now() - Date.parse(p.abierto)) / 3_600_000;
       // `plazoDesde` cuando existe; si no, la apertura (posiciones anteriores a
       // este campo, donde el plazo se puso al abrir y son el mismo instante).
       const horasDePlazo = (Date.now() - Date.parse(p.plazoDesde ?? p.abierto)) / 3_600_000;
-      const vencida = p.horizonteHoras != null && horasDePlazo >= p.horizonteHoras;
+      const n = evaluarNiveles(p, precio, horasDePlazo);
+      const { objetivo, limite, pnlPct, progreso, senal, limitePctEfectivo, limiteEfectivo } = n;
 
-      // PLAZO PROGRESIVO. Antes el plazo era un acantilado: a la hora 48 el
-      // nivel de salida saltaba de -6% a la banda de ruido (~+2,7%) de golpe, y
-      // una posición que sobrevivía en +3% quedaba cortada en el primer bajón
-      // normal del día siguiente. El seguimiento post-cierre ya había medido que
-      // cortar ganadores temprano es EL defecto de este sistema (6 de 6 cierres
-      // siguieron subiendo: TRUMP +68%, ACE +52%), y el plazo agregaba una
-      // séptima manera de hacer lo mismo.
-      //
-      // Ahora el stop SUBE en rampa: al vencer el plazo arranca en su nivel
-      // original y llega a la banda de ruido tras otro tanto de tiempo. La
-      // intención se respeta —el capital que no rinde se libera— pero por
-      // apriete gradual, no por guillotina.
-      const destinoPlazoPct = p.horizonteHoras != null ? umbralPlazoPct(p) : null;
-      const rampa = vencida
-        ? Math.min(1, (horasDePlazo - p.horizonteHoras) / p.horizonteHoras) : 0;
-      const porPlazoPct = vencida
-        ? p.limitePct + (destinoPlazoPct - p.limitePct) * rampa
-        : p.limitePct;
-
-      // TRAILING desde el PICO. "Si sube y después se devuelve un 25%, salir":
-      // protege la ganancia sin ponerle techo, que es lo contrario del objetivo
-      // fijo. El pico NO se acumula tick a tick —con el equipo dormido el 95%
-      // del tiempo, el máximo real no lo ve nadie— sino que se recalcula de las
-      // velas desde la apertura (`picoDesdeApertura`, lo refresca ejecutarStops).
-      //
-      // Solo APRIETA. Un trailing que ensanchara el stop original convertiría
-      // una protección en un permiso para perder más.
-      const porTrailPct = (p.trailPct != null && p.picoDesdeApertura > 0)
-        ? (p.picoDesdeApertura * (1 - p.trailPct / 100) / p.entrada - 1) * 100
-        : null;
-
-      const limitePctEfectivo = porTrailPct != null
-        ? Math.max(porPlazoPct, porTrailPct) : porPlazoPct;
-      const limiteEfectivo = p.entrada * (1 + limitePctEfectivo / 100);
-
-      let senal = 'ok';
-      if (precio >= objetivo) senal = 'cruzo-objetivo';
-      else if (precio <= limite) senal = 'cruzo-limite';
-      // el trailing corta como un stop: es la misma salida, con el nivel movido
-      else if (porTrailPct != null && limitePctEfectivo > p.limitePct && precio <= limiteEfectivo) senal = 'cruzo-limite';
-      // Por encima del stop original pero debajo del apretado por el plazo: la
-      // tesis no falló, se le acabó el tiempo. Se mantiene como salida propia
-      // porque no valida ni refuta nada y el aprendizaje la cuenta aparte.
-      else if (vencida && precio <= limiteEfectivo) senal = 'vencido-sin-renta';
-      else if (pnlPct >= p.objetivoPct * 0.7) senal = 'cerca-objetivo';
-      else if (pnlPct <= p.limitePct * 0.7) senal = 'cerca-limite';
       return {
         ...p, precio, objetivo, limite, pnlPct, progreso, senal, horasAbierta, horasDePlazo,
         // el stop que rige AHORA: igual al original hasta que vence el plazo
-        limitePctEfectivo: Number(limitePctEfectivo.toFixed(2)),
-        limiteEfectivo,
+        limitePctEfectivo, limiteEfectivo,
         trailPct: p.trailPct ?? null,
         picoDesdeApertura: p.picoDesdeApertura ?? null,
-        trailActivo: porTrailPct != null && limitePctEfectivo > porPlazoPct,
-        rampaPlazo: Number(rampa.toFixed(2)),
-        umbralPlazoPct: destinoPlazoPct,
+        trailActivo: n.trailActivo,
+        rampaPlazo: n.rampaPlazo,
+        umbralPlazoPct: n.umbralPlazoPct,
         horasRestantesPlazo: p.horizonteHoras != null ? Math.max(0, p.horizonteHoras - horasDePlazo) : null,
         valorUSDT: p.qty * precio,
         pnlUSDT: p.qty * (precio - p.entrada),
@@ -1756,7 +1875,10 @@ export function drawdownActual(valorAhora) {
 // disco. Lo necesita la jugada manual: sus ventas y sus compras anteriores del
 // mismo lote todavía no están escritas, y juzgar con el estado viejo daría un
 // veredicto sobre una cartera que ya no existe.
-export function compuertaRiesgo(plan, prices, { wallet: walletDado = null } = {}) {
+// `opciones.riesgoExtraUSDT` es el riesgo de las aperturas ENCOLADAS de ese
+// mismo lote: aún no están en posiciones.json, así que riesgoAbierto() las
+// sumaría en cero y dos compras que juntas pasan el tope del 5% se colaban.
+export function compuertaRiesgo(plan, prices, { wallet: walletDado = null, riesgoExtraUSDT = 0 } = {}) {
   const bloqueos = [], avisos = [];
   const wallet = walletDado ?? loadWallet(prices);
   if (!wallet) return { pasa: false, bloqueos: ['no hay billetera ficticia'], avisos };
@@ -1813,7 +1935,7 @@ export function compuertaRiesgo(plan, prices, { wallet: walletDado = null } = {}
       bloqueos.push(`reserva insuficiente: ${(wallet.reserva ?? 0).toFixed(2)} USDT disponibles`);
     }
     const riesgoNuevo = monto * Math.abs(plan.limitePct ?? 0) / 100;
-    const riesgoTotalPct = total ? ((riesgo.usdt + riesgoNuevo) / total) * 100 : 0;
+    const riesgoTotalPct = total ? ((riesgo.usdt + riesgoExtraUSDT + riesgoNuevo) / total) * 100 : 0;
     if (riesgoTotalPct > RIESGO_ABIERTO_MAX_PCT) {
       bloqueos.push(`el riesgo abierto llegaría al ${riesgoTotalPct.toFixed(1)}% del capital (tope ${RIESGO_ABIERTO_MAX_PCT}%)`);
     }
@@ -1911,7 +2033,7 @@ const OBJETIVO_MAX_VECES_STOP = 3;   // techo: un activo derrumbado no da un obj
 // volatilidad — inventar un nivel que no existe sería peor.
 // Parte PURA del cálculo: sin red, para poder probarla. Recibe la volatilidad
 // ya medida en vez de ir a buscar las velas.
-function planDeEntrada({ volPct, distanciaTechoPct = null, distanciaPisoPct = null, senal = null }) {
+export function planDeEntrada({ volPct, distanciaTechoPct = null, distanciaPisoPct = null, senal = null }) {
   const limiteVolPct = -Math.min(15, Math.max(4, Math.round(volPct * STOP_VECES_VOL)));
 
   // STOP ESTRUCTURAL. El objetivo ya se apoyaba en el techo de 30 días, pero el
@@ -1973,7 +2095,7 @@ function planDeEntrada({ volPct, distanciaTechoPct = null, distanciaPisoPct = nu
 // Volatilidad diaria en % sobre una serie de cierres. Una sola copia: la usan
 // el plan de entrada y la condición de la watchlist, y tienen que dar el MISMO
 // número o la condición esperaría algo distinto de lo que decide el tamaño.
-function volatilidadDiaria(cierres) {
+export function volatilidadDiaria(cierres) {
   const rets = [];
   for (let i = 1; i < cierres.length; i++) rets.push(cierres[i] / cierres[i - 1] - 1);
   if (!rets.length) return null;
@@ -2130,7 +2252,13 @@ function aplicarVentas(vender, wallet, prices, { trades, cierresPendientes, avis
     if (bolsillo[v.asset] * precio < 0.01) delete bolsillo[v.asset];
     wallet.reserva = Math.round((wallet.reserva + bruto * (1 - FEE)) * 100) / 100;
     trades.push({ accion: 'VENDER', asset: v.asset, qty, usdt: bruto, precio });
-    cierresPendientes.push(() => cerrarPosicion(v.asset, 'jugada manual', precio));
+    // Venta completa → la posición se cierra. Venta PARCIAL → la posición se
+    // REDUCE: cerrarla entera dejaba el resto en el sleeve sin stop ni
+    // vigilancia (y cerrarPosicion cierra TODAS las abiertas del activo).
+    const ventaTotal = v.usdt == null || bruto >= tenencia * precio - 0.01;
+    cierresPendientes.push(ventaTotal
+      ? () => cerrarPosicion(v.asset, 'jugada manual', precio)
+      : () => reducirPosicion(v.asset, qty, precio));
   }
 }
 
@@ -2150,6 +2278,9 @@ async function registrarContexto(comprar, posicionesNuevas, planes, nota, avisos
         confianza: c.confianza ?? null,
         montoUSDT: pos.qty * pos.entrada / (1 - FEE),
         limitePct: pos.limitePct, objetivoPct: pos.objetivoPct,
+        // si vienen de una oferta, son el score y la señal que la gatearon;
+        // si no, registrarDecision los deriva del contexto y lo declara
+        score: c.score ?? null, senal: c.senal ?? null,
         contexto: { ...(await contextoEntrada(c.asset)), volatilidadDiariaPct: planes[i].volatilidadDiariaPct },
       });
       if (c.tesis == null && nota == null) avisos.push(`${c.asset}: sin tesis registrada — el aprendizaje queda sin el "por qué"`);
@@ -2198,12 +2329,19 @@ export async function jugadaManual({ vender = [], comprar = [], nota, etiqueta, 
   if (malo) throw malo.error;
   const planes = bajados.map(r => r.valor);
 
-  // 2) compras ← reserva, con salidas dimensionadas por volatilidad
+  // 2) compras ← reserva, con salidas dimensionadas por volatilidad.
+  //
+  // El gasto es EL PEDIDO, sin recortar. Antes se hacía min(pedido, reserva):
+  // pedir 8 USDT con 6 disponibles compraba 6 en silencio — y como el monto ya
+  // llegaba recortado, el bloqueo "reserva insuficiente" de la compuerta no
+  // podía dispararse nunca por este camino. Un control que siempre dice OK no
+  // controla nada: ahora el que juzga la reserva es la compuerta, con el monto
+  // real, y si no alcanza la jugada rebota entera con el motivo a la vista.
   const posicionesNuevas = [];
+  let riesgoDelLoteUSDT = 0;
   for (const [i, c] of comprar.entries()) {
     const precio = prices[`${c.asset}USDT`];
-    const gasto = Math.min(c.usdt, wallet.reserva);
-    if (gasto < 0.01) { avisos.push(`Reserva insuficiente para ${c.asset}`); continue; }
+    const gasto = c.usdt;
     if (gasto < 5) avisos.push(`${c.asset}: ${gasto.toFixed(2)} USDT queda bajo el mínimo de orden real de Binance (~5 USDT)`);
     // los sugeridos sirven de vara aunque vengan niveles explícitos: un stop más
     // estrecho que la volatilidad se corta por ruido
@@ -2225,14 +2363,18 @@ export async function jugadaManual({ vender = [], comprar = [], nota, etiqueta, 
     // insuficiente mirando el saldo de antes de la venta. Y como las compras
     // anteriores del mismo lote también están aplicadas, dos compras que solas
     // caben bajo el techo no pueden colarse juntas.
+    // `riesgoExtraUSDT` lleva el riesgo de las compras anteriores de este mismo
+    // lote: sus posiciones todavía no existen en disco y el tope del 5% de
+    // riesgo abierto no las vería.
     const puerta = compuertaRiesgo({
       montoUSDT: gasto, limitePct: niveles.limitePct, objetivoPct: niveles.objetivoPct,
       volatilidadDiariaPct: sugeridos.volatilidadDiariaPct,
-    }, prices, { wallet });
+    }, prices, { wallet, riesgoExtraUSDT: riesgoDelLoteUSDT });
     if (!puerta.pasa) {
       throw Object.assign(new Error(`riesgo en ${c.asset}: ${puerta.bloqueos.join(' · ')}`), { codigo: 423 });
     }
     avisos.push(...puerta.avisos.map(a => `${c.asset}: ${a}`));
+    riesgoDelLoteUSDT += gasto * Math.abs(niveles.limitePct ?? 0) / 100;
 
     const qty = (gasto * (1 - FEE)) / precio;
     wallet.reserva = Math.round((wallet.reserva - gasto) * 100) / 100;
@@ -2246,7 +2388,15 @@ export async function jugadaManual({ vender = [], comprar = [], nota, etiqueta, 
       // explícitos: es un hecho del mercado (dónde está el piso de 30 días), no
       // una preferencia de quien opera.
       invalidacionPct: c.invalidacionPct ?? sugeridos.invalidacionPct,
-      horizonte: c.horizonte, horizonteHoras: c.horizonteHoras,
+      // POLÍTICA DE SALIDA VIGENTE (v4a). Lo que pida la jugada manda —para eso
+      // Jorge puede fijar un plazo o un trailing distinto en una jugada
+      // puntual— pero el DEFECTO ya no es "objetivo fijo + lo que venga":
+      // es la política medida.
+      politicaSalida: c.politicaSalida ?? POLITICA_SALIDA.politicaSalida,
+      trailPct: c.trailPct ?? POLITICA_SALIDA.trailPct,
+      activarTrailEnPct: c.activarTrailEnPct ?? POLITICA_SALIDA.activarTrailEnPct,
+      horizonte: c.horizonte,
+      horizonteHoras: c.horizonteHoras ?? POLITICA_SALIDA.horizonteHoras,
       origen: etiqueta ?? 'jugada manual (Jorge)',
       version: sello,
     });
@@ -2613,8 +2763,11 @@ export async function aplicarPlan() {
     aplicado: true,
     propuesta: null,
     recomendaciones: trades,
-    // los stops de posiciones ya cerradas dejan de existir
-    salidas: (previo.salidas ?? []).filter(s => wallet.holdings[s.asset]),
+    // Los stops de posiciones ya cerradas dejan de existir. Se filtra contra
+    // TODOS los bolsillos (holdingsPlanos): la billetera migrada no tiene la
+    // clave `holdings`, y `wallet.holdings[...]` reventaba acá con la wallet
+    // ya escrita — el estado quedaba a medio actualizar.
+    salidas: (previo.salidas ?? []).filter(s => holdingsPlanos(wallet)[s.asset]),
     notaDelDia: `Plan del modelo v2d aplicado por Jorge: ${trades.length} operaciones, picks ${previo.picks.join(', ')}.`,
     sim,
     real: real ? { total: real.total, detalle: real.detalle, fuente: real.fuente, actualizado: real.actualizado, billeteras: real.billeteras ?? null } : null,
@@ -3058,13 +3211,24 @@ function parametrosDelMotor() {
     cuarentenaDias: CUARENTENA_DIAS, ventanaModeloDias: VENTANA_MODELO_DIAS,
     driftMaxPct: DRIFT_MAX_PCT, watchDias: WATCH_DIAS,
     reconstruccionMaxH: RECONSTRUCCION_MAX_H,
-    // Las tres funciones donde vive una decisión: qué niveles se ponen, cuánta
-    // plata se compromete y qué se bloquea. Cualquier regla nueva cae adentro
-    // de una de ellas, así que el sello la ve aunque nadie la declare.
+    // La política con que nacen las posiciones nuevas: qué las saca y cuándo.
+    // Es una decisión del motor tanto como el stop, así que va al sello.
+    politicaSalida: POLITICA_SALIDA,
+    // Las cuatro funciones donde vive una decisión: qué niveles se ponen al
+    // entrar, cuánta plata se compromete, qué se bloquea, y CUÁNDO SE SALE.
+    // Cualquier regla nueva cae adentro de una de ellas, así que el sello la ve
+    // aunque nadie la declare.
+    //
+    // `salida` se agregó el 2026-09-01 tapando un hueco que iba a morder justo
+    // en el cambio siguiente: la política de salida —el objetivo, el trailing y
+    // la rampa del plazo— no entraba en el sello por ningún lado. El replay
+    // acababa de medir que ahí está la mayor palanca del sistema, y cambiarla
+    // habría dejado las jugadas nuevas atribuidas al motor viejo.
     logica: {
       plan: huellaDeFuncion(planDeEntrada),
       sizing: huellaDeFuncion(montoPorRiesgo),
       compuerta: huellaDeFuncion(compuertaRiesgo),
+      salida: huellaDeFuncion(evaluarNiveles),
     },
   };
 }

@@ -160,6 +160,13 @@ const server = createServer(async (req, res) => {
       const { informe } = await import('./aprendizaje.mjs');
       return json(200, informe());
     }
+    // Contrafactual: qué hizo el precio de los candidatos que NO compramos,
+    // agrupado por el filtro que los rechazó. Sale a la red a pedir velas, así
+    // que va aparte del informe y no se recalcula en cada carga del dashboard.
+    if (req.method === 'GET' && req.url === '/api/candidatos') {
+      const { seguimientoCandidatos } = await import('./aprendizaje.mjs');
+      return json(200, await seguimientoCandidatos());
+    }
     // Veredicto de una jugada cerrada: lo que convierte un resultado en lección
     if (req.method === 'POST' && req.url === '/api/veredicto') {
       try {

@@ -16,10 +16,10 @@
 // Uso desde consola:  node src/aprendizaje.mjs [--json]
 // No opera ni toca la billetera: solo lee y escribe sus propios registros.
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, appendFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { leerAprendizaje, escribirAprendizaje, appendAprendizaje, rsi, huellaDeFuncion } from './engine.mjs';
+import { leerAprendizaje, escribirAprendizaje, appendAprendizaje, rsi, clasificarTendencia, huellaDeFuncion } from './engine.mjs';
 
 const DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(DIR, '..');
@@ -114,14 +114,76 @@ export async function contextoEntrada(asset) {
     const pisoRetroceso = desdeTecho.length ? Math.min(...desdeTecho) : null;
     ctx.distanciaPisoPct = pisoRetroceso > 0
       ? Number(((c.at(-1) / pisoRetroceso - 1) * 100).toFixed(2)) : null;
+
+    // FASE y SALTO DE VOLUMEN. Faltaban, y su ausencia era la razón de que el
+    // score no se pudiera calcular en este camino: `scoreSetup` los necesita.
+    // Salen de las MISMAS 31 velas, sin una llamada más.
+    ctx.fase = clasificarTendencia(c)?.estado ?? null;
+    ctx.saltoVolumen = saltoVolumenDe(d);
   }
   if (h) ctx.rsi14h = rsi(h.map(x => parseFloat(x[4])));
   ctx.regimen = await regimenMercado();
   return ctx;
 }
 
+// El salto de volumen a partir de velas YA descargadas. Tiene que dar el mismo
+// número que `saltoVolumen()` o el score dependería de por qué camino se
+// calculó — la misma trampa que la ventana de volatilidad de la watchlist.
+// Por eso replica su aritmética exacta: descartar la vela de hoy (en curso),
+// quedarse con 8 días completos, y comparar el último contra los 7 previos.
+function saltoVolumenDe(velasDiarias) {
+  const vols = velasDiarias.slice(0, -1).map(x => parseFloat(x[7])).filter(v => v > 0).slice(-8);
+  if (vols.length < 4) return null;
+  const previos = vols.slice(0, -1);
+  const media = previos.reduce((a, b) => a + b, 0) / previos.length;
+  return media ? Number((vols.at(-1) / media).toFixed(1)) : null;
+}
+
+// El régimen se guarda como objeto (con sus métricas), pero `scoreSetup` espera
+// el tipo. Un objeto ahí caía al valor por defecto en silencio y el componente
+// "régimen" del score quedaba en 0,5 sin que nada lo dijera.
+const tipoDeRegimen = r => (typeof r === 'string' ? r : r?.tipo) ?? null;
+
 // Registra una decisión (apertura) con su contexto y su tesis.
-export function registrarDecision({ asset, posicionId, tesis, confianza, contexto, autor = 'Jorge', montoUSDT, limitePct, objetivoPct }) {
+//
+// EL SCORE VA COMO CAMPO, NO COMO FRASE. Hasta acá el score existía solo dentro
+// del texto de la tesis ("score 74, mejor R:B del lote"), así que la hipótesis
+// `score-de-confianza` —correlacionar score con resultado a partir de n≥20— era
+// INEJECUTABLE por construcción: aunque llegaran 200 jugadas, el dato nunca se
+// había guardado en forma consultable. Es el mismo defecto que la auditoría
+// encontró en tres controles: la comprobación no puede correr porque le falta
+// el operando.
+//
+// `scoreOrigen` distingue dos números que NO son el mismo y que mezclados
+// arruinarían el análisis:
+//   declarado — el score que de verdad decidió (viene de la oferta que lo gateó)
+//   derivado  — reconstruido acá desde el contexto, para jugadas manuales que
+//               nunca pasaron por el screening
+export function registrarDecision({ asset, posicionId, tesis, confianza, contexto, autor = 'Jorge', montoUSDT, limitePct, objetivoPct, score = null, desglose = null, senal = null }) {
+  let scoreOrigen = null;
+  if (score != null) {
+    scoreOrigen = 'declarado';
+  } else if (contexto) {
+    // Derivable solo si el contexto trae con qué: sin fase ni régimen el score
+    // sería el promedio de sus valores por defecto disfrazado de medición.
+    const paraScore = {
+      rsi14d: contexto.rsi14d, rsi14h: contexto.rsi14h,
+      fase: contexto.fase ?? null,
+      regimen: tipoDeRegimen(contexto.regimen),
+      saltoVolumen: contexto.saltoVolumen ?? null,
+    };
+    if (paraScore.rsi14d != null && paraScore.fase && paraScore.regimen) {
+      const r = scoreSetup(paraScore);
+      score = r.score; desglose = r.desglose; scoreOrigen = 'derivado';
+      senal ??= detectarSenales({
+        momentum30dPct: contexto.momentum30dPct,
+        distanciaMax30dPct: contexto.distanciaMax30dPct,
+        rsi14d: contexto.rsi14d,
+        fase: paraScore.fase,
+        saltoVolumen: paraScore.saltoVolumen,
+      }).principal;
+    }
+  }
   const reg = {
     tipo: 'decision',
     ts: new Date().toISOString(),
@@ -129,6 +191,9 @@ export function registrarDecision({ asset, posicionId, tesis, confianza, context
     tesis: tesis ?? null,
     confianza: confianza ?? null,
     montoUSDT, limitePct, objetivoPct,
+    score, desglose, scoreOrigen,
+    senal: senal ?? null,
+    senalNombre: senal ? (SENALES[senal]?.nombre ?? null) : null,
     contexto: contexto ?? null,
   };
   appendAprendizaje(reg);
@@ -168,7 +233,10 @@ export function veredictosPendientes() {
 // sirven. Hoy los aplico a mano y los casos donde NO operamos no dejan rastro.
 // ---------------------------------------------------------------------------
 
-const CRITERIOS = {
+// Exportado para que el replay histórico (`replay-salidas.mjs --historico`)
+// genere entradas con LOS MISMOS criterios que el screener aplica en vivo. Si
+// los copiara, mediría políticas de salida sobre entradas de otro sistema.
+export const CRITERIOS = {
   rsiMaximo: 70,        // lección GPS/ACE: entrar sobrecomprado tiene castigo
   saltoVolumenMax: 6,   // hallazgo RE: 12,3x era pump propio, no rally de mercado
   regimenesVetados: ['débil', 'caída amplia'],
@@ -190,6 +258,119 @@ export async function saltoVolumen(asset) {
     const media = previos.reduce((a, b) => a + b, 0) / previos.length;
     return media ? Number((ultimo / media).toFixed(1)) : null;
   } catch { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// CONTRAFACTUAL: qué pasó con lo que NO compramos
+//
+// El screener evalúa ~12 candidatos por corrida y compra 0 o 1. Los otros se
+// descartaban y desaparecían, así que el sistema solo podía aprender de las
+// jugadas que hizo: 16 en dos semanas, con el rango de RSI aplastado entre 58 y
+// 69 porque la compuerta no deja pasar otra cosa. Es un termómetro que solo
+// mide entre 36 y 37 grados.
+//
+// Registrando también los rechazados —con su motivo etiquetado— y midiendo
+// después qué hizo el precio, cada corrida deja ~12 pares contexto→resultado en
+// vez de 0. Y aparece por fin la pregunta que hoy no se puede contestar: **cada
+// filtro, ¿nos ahorra plata o nos la cuesta?**
+//
+// UNA OBSERVACIÓN POR ACTIVO Y POR DÍA. Los criterios se calculan sobre velas
+// diarias, así que registrar cada 3 minutos guardaría 480 copias del mismo
+// juicio. El tope vive en memoria: tras un reinicio se puede repetir una vez en
+// el día, y el análisis deduplica por (activo, fecha).
+const CANDIDATOS_FILE = join(DATA, 'candidatos.jsonl');
+let _registradosHoy = { fecha: null, vistos: new Set() };
+
+export function registrarCandidato(reg) {
+  const fecha = new Date().toISOString().slice(0, 10);
+  if (_registradosHoy.fecha !== fecha) _registradosHoy = { fecha, vistos: new Set() };
+  if (_registradosHoy.vistos.has(reg.asset)) return null;
+  _registradosHoy.vistos.add(reg.asset);
+  const fila = { ts: new Date().toISOString(), fecha, ...reg };
+  appendFileSync(CANDIDATOS_FILE, JSON.stringify(fila) + '\n');
+  return fila;
+}
+
+export function leerCandidatos() {
+  const filas = leerJSONL(CANDIDATOS_FILE);
+  // dedup por (activo, fecha): un reinicio puede haber repetido la observación
+  const vistos = new Set();
+  return filas.filter(f => {
+    const k = `${f.asset}|${f.fecha}`;
+    if (vistos.has(k)) return false;
+    vistos.add(k);
+    return true;
+  });
+}
+
+// Qué hizo el precio DESPUÉS del juicio. Mismo método que el seguimiento
+// post-cierre: se lee de las velas, así que funciona retroactivamente y una vez
+// pasada la ventana el número es definitivo.
+const CANDIDATOS_SEG = join(DATA, 'candidatos-seguimiento.json');
+const VENTANA_CANDIDATO_H = 48;
+
+export async function seguimientoCandidatos() {
+  const cache = existsSync(CANDIDATOS_SEG) ? JSON.parse(readFileSync(CANDIDATOS_SEG, 'utf8')) : {};
+  const filas = leerCandidatos().filter(f => f.precio > 0);
+  let cambio = false;
+
+  for (const f of filas) {
+    const clave = `${f.asset}|${f.fecha}`;
+    if (cache[clave]?.completo) continue;
+    const desde = Date.parse(f.ts);
+    const horas = (Date.now() - desde) / 3_600_000;
+    if (horas < 1) continue;
+    try {
+      const k = await klines2(`${f.asset}USDT`, '1h', desde, Math.min(1000, Math.ceil(Math.min(horas, VENTANA_CANDIDATO_H)) + 2));
+      if (!k.length) continue;
+      const cierreA = h => {
+        const v = k[Math.min(h, k.length - 1)];
+        return v ? parseFloat(v[4]) : null;
+      };
+      const maximo = Math.max(...k.slice(0, VENTANA_CANDIDATO_H + 1).map(v => parseFloat(v[2])));
+      cache[clave] = {
+        completo: horas >= VENTANA_CANDIDATO_H,
+        h24Pct: horas >= 24 ? (cierreA(24) / f.precio - 1) * 100 : null,
+        h48Pct: horas >= 48 ? (cierreA(48) / f.precio - 1) * 100 : null,
+        maximoPct: (maximo / f.precio - 1) * 100,
+      };
+      cambio = true;
+    } catch { /* sin par o sin velas: se omite */ }
+  }
+  if (cambio) escribirAprendizaje(CANDIDATOS_SEG, cache);
+
+  // Agregado por FILTRO: la pregunta que justifica todo esto.
+  const porFiltro = new Map();
+  let medidos = 0;
+  for (const f of filas) {
+    const d = cache[`${f.asset}|${f.fecha}`];
+    const ret = d?.h48Pct ?? d?.h24Pct;
+    if (ret == null) continue;
+    medidos++;
+    const k = f.veredicto === 'aceptado' ? '(aceptado)' : f.filtro ?? 'otro';
+    if (!porFiltro.has(k)) porFiltro.set(k, { filtro: k, n: 0, suma: 0, subieron: 0, mejor: -Infinity, peor: Infinity });
+    const g = porFiltro.get(k);
+    g.n++; g.suma += ret; if (ret > 0) g.subieron++;
+    g.mejor = Math.max(g.mejor, ret); g.peor = Math.min(g.peor, ret);
+  }
+
+  return {
+    ventanaH: VENTANA_CANDIDATO_H,
+    n: filas.length, medidos,
+    // Con n chico esto es una pista, no un veredicto: mismo umbral que el resto
+    // del motor de aprendizaje.
+    significativo: medidos >= N_MINIMO,
+    porFiltro: [...porFiltro.values()]
+      .map(g => ({ ...g, medioPct: g.suma / g.n, subieronPct: (g.subieron / g.n) * 100 }))
+      .sort((a, b) => b.medioPct - a.medioPct),
+  };
+}
+
+// klines desde un instante dado (el `klines` de arriba pide las más recientes).
+async function klines2(symbol, interval, startTime, limit) {
+  const res = await fetch(`${API}/api/v3/klines?symbol=${symbol}&interval=${interval}&startTime=${startTime}&limit=${limit}`);
+  if (!res.ok) throw new Error(`klines ${symbol}: HTTP ${res.status}`);
+  return res.json();
 }
 
 // Activos ya avisados hace poco: no repetir lo mismo cada 3 minutos.
@@ -310,6 +491,12 @@ export function parametrosDeSenales() {
     umbralScore: UMBRAL_SCORE,
     pesos: PESOS,
     prioridad: PRIORIDAD,
+    // Los criterios del screener son reglas de decisión tanto como el score:
+    // el veto de régimen rechazó los 12 candidatos del 1-sep él solo. No
+    // estaban en el sello, así que cambiar `regimenesVetados` habría movido
+    // qué se compra sin mover la versión — el mismo hueco que la política de
+    // salida tenía, encontrado en otro sitio el mismo día.
+    criterios: CRITERIOS,
     detectores: Object.fromEntries(
       Object.entries(SENALES).map(([k, s]) => [k, huellaDeFuncion(s.detecta)])),
     score: huellaDeFuncion(scoreSetup),
@@ -338,7 +525,27 @@ export async function buscarOportunidades({ registrar = true } = {}) {
 
   const regimen = await regimenMercado();
   if (!regimen) return { regimen: null, descartadas: [], oportunidades: [], motivo: 'sin datos de mercado' };
+
+  // EL VETO DE RÉGIMEN TAMBIÉN ES UNA DECISIÓN, Y HASTA ACÁ NO DEJABA RASTRO.
+  // Se salía sin mirar un solo candidato, así que el día que veta —el 1-sep
+  // vetó absolutamente todo— no quedaba registro de QUÉ se dejó pasar. Sin eso
+  // la pregunta "¿el veto de régimen nos ahorra plata o nos la cuesta?" es
+  // incontestable por construcción, igual que lo era la del score.
+  //
+  // Los candidatos se registran desde el radar YA CALCULADO: no cuesta ninguna
+  // llamada extra medir lo que igual íbamos a descartar.
   if (CRITERIOS.regimenesVetados.includes(regimen.tipo)) {
+    if (registrar) {
+      for (const m of radarParaBot(12).mercado) {
+        registrarCandidato({
+          asset: m.asset, precio: m.precio, veredicto: 'rechazado',
+          motivo: `régimen "${regimen.tipo}" vetado`, filtro: 'regimen',
+          regimen: regimen.tipo, rsi14d: m.rsi14d,
+          fase: m.tendencia?.estado ?? null,
+          momentum30dPct: m.momentum != null ? Number((m.momentum * 100).toFixed(2)) : null,
+        });
+      }
+    }
     return { regimen, descartadas: [], oportunidades: [], motivo: `régimen "${regimen.tipo}": es resaca de rally, no entrada fresca` };
   }
 
@@ -351,22 +558,39 @@ export async function buscarOportunidades({ registrar = true } = {}) {
 
   const oportunidades = [], descartadas = [];
   for (const m of mercado) {
-    const rechazo = r => descartadas.push({ asset: m.asset, motivo: r });
-    if (m.momentum <= 0) { rechazo('momentum negativo'); continue; }
-    if (enCartera.has(m.asset)) { rechazo('ya está en la cartera'); continue; }
-    if (enCuarentena(m.asset)) { rechazo('en cuarentena por corte reciente'); continue; }
-    if (yaAvisados.has(m.asset)) { rechazo(`ya avisado en las últimas ${CRITERIOS.horasSinRepetir} h`); continue; }
+    // Cada rechazo queda registrado con SU FILTRO, no solo con su texto: el
+    // texto sirve para leerlo, la etiqueta sirve para agrupar cientos de casos
+    // y preguntar "¿este filtro nos ahorra plata o nos la cuesta?".
+    let ctx = null, salto = null;
+    const rechazo = (r, filtro) => {
+      descartadas.push({ asset: m.asset, motivo: r });
+      if (registrar) {
+        registrarCandidato({
+          asset: m.asset, precio: m.precio, veredicto: 'rechazado', motivo: r, filtro,
+          regimen: regimen.tipo, rsi14d: ctx?.rsi14d ?? m.rsi14d,
+          fase: m.tendencia?.estado ?? null,
+          momentum30dPct: ctx?.momentum30dPct
+            ?? (m.momentum != null ? Number((m.momentum * 100).toFixed(2)) : null),
+          distanciaMax30dPct: ctx?.distanciaMax30dPct ?? null,
+          saltoVolumen: salto,
+        });
+      }
+    };
+    if (m.momentum <= 0) { rechazo('momentum negativo', 'momentum'); continue; }
+    if (enCartera.has(m.asset)) { rechazo('ya está en la cartera', 'cartera'); continue; }
+    if (enCuarentena(m.asset)) { rechazo('en cuarentena por corte reciente', 'cuarentena'); continue; }
+    if (yaAvisados.has(m.asset)) { rechazo(`ya avisado en las últimas ${CRITERIOS.horasSinRepetir} h`, 'repetido'); continue; }
 
-    const ctx = await contextoEntrada(m.asset).catch(() => null);
-    if (!ctx) { rechazo('sin contexto de mercado'); continue; }
+    ctx = await contextoEntrada(m.asset).catch(() => null);
+    if (!ctx) { rechazo('sin contexto de mercado', 'sin-datos'); continue; }
     // techo de cordura: sobrecompra EXTREMA sigue siendo veto duro — el score
     // gradúa la zona gris (RSI 65-79), no anula la lección de ACE y RE
     if (ctx.rsi14d == null || ctx.rsi14d >= 80) {
-      rechazo(`RSI14 ${ctx.rsi14d ?? '?'} ≥ 80 (sobrecompra extrema)`); continue;
+      rechazo(`RSI14 ${ctx.rsi14d ?? '?'} ≥ 80 (sobrecompra extrema)`, 'rsi'); continue;
     }
-    const salto = await saltoVolumen(m.asset);
+    salto = await saltoVolumen(m.asset);
     if (salto != null && salto > CRITERIOS.saltoVolumenMax) {
-      rechazo(`salto de volumen ${salto}× sobre su promedio (pump propio, no rally)`); continue;
+      rechazo(`salto de volumen ${salto}× sobre su promedio (pump propio, no rally)`, 'volumen'); continue;
     }
 
     // El patrón se busca ANTES de puntuar: sin tesis reconocible no hay entrada,
@@ -380,7 +604,7 @@ export async function buscarOportunidades({ registrar = true } = {}) {
       saltoVolumen: salto,
     };
     const { senales, principal } = detectarSenales(paraSenal);
-    if (!principal) { rechazo('ningún patrón reconocible (ni pullback, ni ruptura, ni momentum)'); continue; }
+    if (!principal) { rechazo('ningún patrón reconocible (ni pullback, ni ruptura, ni momentum)', 'sin-patron'); continue; }
 
     const { score, desglose } = scoreSetup({
       rsi14d: ctx.rsi14d, rsi14h: ctx.rsi14h,
@@ -389,7 +613,7 @@ export async function buscarOportunidades({ registrar = true } = {}) {
     });
     if (score < UMBRAL_SCORE) {
       const peor = Object.entries(desglose).sort((a, b) => a[1] - b[1])[0];
-      rechazo(`${SENALES[principal].nombre}: score ${score}/100 bajo el umbral ${UMBRAL_SCORE} (lo que más pesa en contra: ${peor[0]} ${peor[1]}/100)`);
+      rechazo(`${SENALES[principal].nombre}: score ${score}/100 bajo el umbral ${UMBRAL_SCORE} (lo que más pesa en contra: ${peor[0]} ${peor[1]}/100)`, 'score');
       continue;
     }
 
@@ -403,8 +627,19 @@ export async function buscarOportunidades({ registrar = true } = {}) {
     // R:B como CRITERIO, no como adorno. Solo puede serlo desde que el objetivo
     // es estructural: mientras fue `|stop| x 2,5` valía 2,50 siempre.
     if (stops && stops.riesgoBeneficio < stops.rbMinimo) {
-      rechazo(`${SENALES[principal].nombre}: R:B ${stops.riesgoBeneficio} bajo el mínimo ${stops.rbMinimo} — arriesga ${Math.abs(stops.limitePct)}% para ganar ${stops.objetivoPct}%`);
+      rechazo(`${SENALES[principal].nombre}: R:B ${stops.riesgoBeneficio} bajo el mínimo ${stops.rbMinimo} — arriesga ${Math.abs(stops.limitePct)}% para ganar ${stops.objetivoPct}%`, 'rb');
       continue;
+    }
+
+    // El aceptado se registra igual que el rechazado: sin el grupo que SÍ pasó
+    // no hay contra qué comparar a los descartados.
+    if (registrar) {
+      registrarCandidato({
+        asset: m.asset, precio: m.precio, veredicto: 'aceptado', motivo: null, filtro: null,
+        regimen: regimen.tipo, rsi14d: ctx.rsi14d, fase: m.tendencia?.estado ?? null,
+        momentum30dPct: ctx.momentum30dPct, distanciaMax30dPct: ctx.distanciaMax30dPct,
+        saltoVolumen: salto, score, senal: principal,
+      });
     }
 
     oportunidades.push({

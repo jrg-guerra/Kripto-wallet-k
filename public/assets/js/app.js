@@ -577,6 +577,24 @@ function renderPosiciones(posiciones) {
     }[p.senal] ?? 'en rango';
     const alLimite = ((p.precio / p.limite - 1) * 100);
     const alObjetivo = ((p.objetivo / p.precio - 1) * 100);
+    // El nivel que de verdad va a vender NO es siempre el stop original: bajo
+    // política de trailing manda `limiteEfectivo`, y mostrar el otro sería un
+    // panel que informa un precio de salida que no es el que se va a ejecutar.
+    const salidaVigente = q => {
+      const efec = q.limiteEfectivo ?? q.limite;
+      const falta = ((q.precio / efec - 1) * 100);
+      if (q.trailActivo) return `trailing ${precio(efec)} (${q.limitePctEfectivo}%) · falta ${falta.toFixed(1)}%`;
+      if (q.politicaSalida === 'trailing' && q.trailPct != null) {
+        return `límite ${precio(efec)} (${q.limitePctEfectivo}%) · trailing ${q.trailPct}% arma en +${q.activarTrailEnPct}%`;
+      }
+      return `límite ${precio(efec)} (${q.limitePctEfectivo ?? q.limitePct}%) · falta ${falta.toFixed(1)}%`;
+    };
+    // Con política de trailing el objetivo dejó de ser una venta: es la
+    // referencia estructural con la que se midió el R:B al entrar. Decir
+    // "objetivo" ahí prometería un cobro que no va a ocurrir.
+    const techoDeReferencia = (q, al) => q.politicaSalida === 'trailing'
+      ? `techo 30d ${precio(q.objetivo)} (+${q.objetivoPct}%) · referencia, no vende`
+      : `objetivo ${precio(q.objetivo)} (+${q.objetivoPct}%) · falta ${al.toFixed(1)}%`;
     return `<div class="pos ${clase}">
       <div class="pos-head">
         <span class="pos-asset">${p.asset}</span>
@@ -590,8 +608,8 @@ function renderPosiciones(posiciones) {
       <div class="pos-barra" role="img" aria-label="posición entre el límite y el objetivo: ${(p.progreso * 100).toFixed(0)}%">
         <div class="pos-track"><div class="pos-marker" style="--pos:${(p.progreso * 100).toFixed(1)}%"></div></div>
         <div class="pos-niveles">
-          <span class="down">límite ${precio(p.limite)} (${p.limitePct}%) · falta ${alLimite.toFixed(1)}%</span>
-          <span class="up">objetivo ${precio(p.objetivo)} (+${p.objetivoPct}%) · falta ${alObjetivo.toFixed(1)}%</span>
+          <span class="down">${salidaVigente(p)}</span>
+          <span class="up">${techoDeReferencia(p, alObjetivo)}</span>
         </div>
       </div>
     </div>`;
