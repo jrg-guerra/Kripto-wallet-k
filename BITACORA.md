@@ -3961,3 +3961,63 @@ causa algo que fue una casualidad.
 **Lección:** cuando el síntoma aparece en una máquina y no en otra con el mismo
 código y los mismos datos, lo que difiere no es el programa: es lo que cada
 navegador tenía guardado. Buscarlo en el render fue mirar donde había luz.
+
+## 2026-09-03 — Primera entrada bajo v4a, y el bucle que se moría con el primer rechazo
+
+### El régimen se dio vuelta
+
+Tras tres días vetado (`caída amplia` 0%, luego `débil` 20%), amaneció en
+**rally amplio con amplitud 100%**: las cinco referencias suben, BTC +1,95% en
+24 h. Primera vez que el veto se levanta desde que se instrumentó.
+
+### PROM: la primera posición con la política nueva
+
+Score 82/100 —el más alto registrado— con el mejor perfil que hemos visto:
+RSI 57,3 diario y 43,7 horario (ni cara ni comprando el pico intradía), +137%
+en 30 días pero −6,3% en la semana, y **42,6% de recorrido hasta su techo de
+30 días**. El stop estructural apretó el −15% de volatilidad a −10% apoyándose
+en el piso del retroceso; R:B 3,0, el doble del mínimo.
+
+`pos-0018` abrió con `politicaSalida: trailing`, trailing 10% que se arma en
++10%, sin plazo, y el +30% degradado a referencia. Es la primera jugada que
+estrena v4a — hasta ahora todas las abiertas eran anteriores.
+
+Aviso que viajó con ella, y hay que mirarlo cuando cierre: volatilidad 14,2%
+diaria, así que el mínimo de orden de 5 USDT deja el riesgo en 0,50 contra el
+objetivo de 0,35 (1,43x, justo bajo el tope de 1,5x que bloquearía).
+
+### El bug: un rechazo legítimo mataba a los siguientes
+
+Revisando por qué solo había UNA oferta con cinco candidatos aprobados
+(PROM 82, PUMP 74, TRUMP 72, ENA 68, LINK 66), el log lo dijo:
+
+```
+[09:57:41] [OPORTUNIDAD] PROM ...
+[09:57:46] [OPORTUNIDAD] PUMP ...
+[09:57:48] oportunidades: riesgo: arriesga 0.65 USDT, 1.9x el objetivo ...
+```
+
+El `try` envolvía el **bucle entero**. PROM creó su oferta, PUMP rebotó en la
+compuerta —correctamente— y esa excepción abortó el bucle: **TRUMP, ENA y LINK
+nunca se evaluaron**. Ya había pasado el 2-sep a las 16:59 (TRUMP bloqueó) y a
+las 20:03 (HEMI). Tres ocurrencias en dos días, invisibles porque el síntoma es
+una ausencia: no aparece un error, aparecen *menos ofertas*.
+
+Es exactamente la lección que ya rige el barrido de candidatos —"un símbolo
+caído nunca debe tumbar el análisis completo"— sin aplicar en este bucle. Otra
+vez: la lección estaba escrita, y aplicada en un solo sitio.
+
+Ahora cada candidato tiene su propio `try`. Y se distingue el bloqueo del
+fallo: un 423 de la compuerta es **el control haciendo su trabajo**, así que se
+registra y se sigue; avisar por macOS cada vez que el riesgo rechaza algo
+entrena a ignorar los avisos, y entonces el que importa tampoco se lee.
+
+**Verificación, honestamente:** el arreglo es estructural y se comprobó
+leyéndolo; el filtro anti-repetición de 12 h impide reproducir el ciclo en vivo
+ahora mismo. La firma observable llega en el próximo ciclo con varios
+candidatos: los rechazados deben salir como `[OPORTUNIDAD] X descartada — …` en
+vez de matar el bucle. Queda anotado para mirarlo, no dado por hecho.
+
+**Deuda:** `server.mjs` arranca el listener al importarse, así que su lógica no
+es testeable desde `test.mjs`. Este bug habría sido un test de tres líneas si el
+bucle viviera en una función pura. Se declara en vez de dejarlo parecer cubierto.

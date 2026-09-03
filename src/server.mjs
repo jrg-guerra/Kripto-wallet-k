@@ -523,10 +523,28 @@ async function vigilar() {
         // La oferta lleva monto y niveles ya fijados: aprobar es aceptar ESTO,
         // no abrir la puerta a improvisar una operación desde el teléfono.
         // `nuevaOferta` la persiste y ya avisa al teléfono con sus botones.
-        await nuevaOferta(o.asset, null, {
-          saltoVolumen: o.saltoVolumen, regimen: regimen.tipo, score: o.score,
-          senal: o.senal, senalNombre: o.senalNombre, senalLectura: o.senalLectura,
-        });
+        //
+        // CADA CANDIDATO EN SU PROPIO try. Antes el try envolvía el bucle
+        // entero, así que el primer candidato que la compuerta bloqueaba
+        // **mataba la evaluación de todos los siguientes**. Medido el 3-sep:
+        // pasaron cinco (PROM 82, PUMP 74, TRUMP 72, ENA 68, LINK 66), PUMP
+        // rebotó por riesgo y TRUMP, ENA y LINK no llegaron a mirarse. Ya había
+        // pasado el 2-sep dos veces. Es la misma lección que ya rige el barrido
+        // de candidatos —"un símbolo caído no tumba el análisis completo"—
+        // aplicada donde faltaba.
+        try {
+          await nuevaOferta(o.asset, null, {
+            saltoVolumen: o.saltoVolumen, regimen: regimen.tipo, score: o.score,
+            senal: o.senal, senalNombre: o.senalNombre, senalLectura: o.senalLectura,
+          });
+        } catch (e) {
+          // Un bloqueo de la compuerta (423) NO es una falla: es el control
+          // haciendo su trabajo, y merece registro, no alarma. Avisar por
+          // macOS cada vez que el riesgo rechaza algo entrena a ignorar los
+          // avisos — y entonces el que importa tampoco se lee.
+          if (e.codigo === 423) console.log(`[OPORTUNIDAD] ${o.asset} descartada — ${e.message}`);
+          else avisarFalla(`oferta ${o.asset}`, e);
+        }
       }
     } catch (e) { avisarFalla('oportunidades', e); }
 
