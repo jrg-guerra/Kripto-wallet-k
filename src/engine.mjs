@@ -15,7 +15,11 @@ const ROOT = join(DIR, '..');
 const DATA = process.env.KW_DATA || join(ROOT, 'data');
 const API = 'https://api.binance.com';
 // Stablecoins de USD: valen 1:1 con USDT para la valorización.
-const STABLES_USD = new Set(['USDT', 'USDC', 'FDUSD', 'TUSD', 'DAI', 'BUSD', 'USDP', 'USD1', 'XUSD']);
+// RLUSD se agregó el 2026-09-15: no estaba, así que el motor la trataba como
+// un activo normal y la dejó llegar hasta la compuerta, que la frenó por R:B
+// (0,25) — el control correcto, por la razón equivocada. Una lista a mano no
+// alcanza: ver `pareceStable()` abajo.
+const STABLES_USD = new Set(['USDT', 'USDC', 'FDUSD', 'TUSD', 'DAI', 'BUSD', 'USDP', 'USD1', 'XUSD', 'RLUSD']);
 // Lista completa de stables (USD + EUR): se excluyen de los candidatos de la
 // estrategia. Las de EUR NO valen 1 USDT — se valorizan por su par (EURUSDT…).
 const STABLES = new Set([...STABLES_USD, 'EUR', 'EURI', 'AEUR']);
@@ -23,6 +27,9 @@ const STABLES = new Set([...STABLES_USD, 'EUR', 'EURI', 'AEUR']);
 // criptos — se excluyen de la estrategia. Los nuevos se detectan además por
 // patrón de volumen en momentumModelo().
 const TOKENIZADOS = new Set(['SNXXB', 'SNDKB', 'SPCXB', 'MUB', 'KORUB', 'CRCLB']);
+// Bajo esta volatilidad diaria, un activo no es operable por esta estrategia:
+// es una stablecoin (declarada o no). Ver el detector en momentumModelo().
+const STABLE_VOL_MAX_PCT = 0.5;
 const CAPITAL_INICIAL = 10_000;
 const CANDIDATOS = 30;
 const PICKS = 3;
@@ -776,6 +783,20 @@ async function momentumModelo(symbol) {
   }
 
   const cierres = klines.map(k => parseFloat(k[4]));
+
+  // STABLECOIN NO DECLARADA. La lista `STABLES_USD` se escribe a mano y por eso
+  // se pudre: RLUSD faltaba y el motor la ofreció como candidato hasta que la
+  // compuerta la frenó por R:B. Nombrarlas una por una es perseguir el síntoma
+  // —salen stablecoins nuevas todo el tiempo— así que se detectan por lo que
+  // HACEN: una moneda anclada no se mueve.
+  //
+  // Es el mismo remedio que ya rige para los valores tokenizados unas líneas
+  // más arriba: lista para las conocidas, detector de conducta para las demás.
+  //
+  // El umbral es holgado a propósito: la cripto más quieta del radar se mueve
+  // 3%/día, y una stable ancla da ~0%. Cualquier cosa bajo 0,5% no es un activo
+  // con el que esta estrategia pueda trabajar — no hay recorrido que capturar.
+  if (volatilidadDiaria(cierres) < STABLE_VOL_MAX_PCT) return null;
   return {
     momentum: cierres.at(-1) / cierres[0] - 1,
     tendencia: clasificarTendencia(cierres),
@@ -3291,6 +3312,7 @@ function parametrosDelMotor() {
     drawdownMaxPct: DRAWDOWN_MAX_PCT, riesgoAbiertoMaxPct: RIESGO_ABIERTO_MAX_PCT,
     volDiariaAvisoPct: VOL_DIARIA_AVISO_PCT, riesgoDesvioMaxVeces: RIESGO_DESVIO_MAX_VECES,
     limiteSleevePct: LIMITE_SLEEVE_PCT, picks: PICKS, candidatos: CANDIDATOS,
+    stableVolMaxPct: STABLE_VOL_MAX_PCT,
     cuarentenaDias: CUARENTENA_DIAS, ventanaModeloDias: VENTANA_MODELO_DIAS,
     driftMaxPct: DRIFT_MAX_PCT, watchDias: WATCH_DIAS,
     reconstruccionMaxH: RECONSTRUCCION_MAX_H,
@@ -3381,7 +3403,9 @@ export function radarParaBot(n = 5) {
 // Internos expuestos SOLO para los tests (src/test.mjs). No los use el server:
 // la superficie pública del motor son los `export function` de arriba.
 export const _test = {
-  FEE, parametrosDelMotor, FUNCIONES_QUE_DECIDEN, walletValue, rebalance, migrarWallet, escribirJSON, escribirEstado, leerJSON,
+  FEE, parametrosDelMotor, FUNCIONES_QUE_DECIDEN,
+  esStableUSD: a => STABLES_USD.has(a),
+  STABLE_VOL_MAX_PCT, momentumModelo, walletValue, rebalance, migrarWallet, escribirJSON, escribirEstado, leerJSON,
   BOLSILLOS, simSummary, valorDe, clasificarTendencia,
   stopsSugeridosPuro: planDeEntrada, enParalelo, volatilidadDiaria,
   reconstruirCruce,

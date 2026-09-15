@@ -4021,3 +4021,47 @@ vez de matar el bucle. Queda anotado para mirarlo, no dado por hecho.
 **Deuda:** `server.mjs` arranca el listener al importarse, así que su lógica no
 es testeable desde `test.mjs`. Este bug habría sido un test de tres líneas si el
 bucle viviera en una función pura. Se declara en vez de dejarlo parecer cubierto.
+
+## 2026-09-15 — RLUSD, y por qué una lista de stablecoins se pudre sola
+
+Jorge pidió comprar 5 USDT de XRP, RLUSD y UNI. Dos se ejecutaron; **RLUSD la
+frenó la compuerta** con R:B 0,25 — arriesgar 4% para ganar 1%.
+
+Y ahí estaba el problema: RLUSD es la stablecoin de Ripple, anclada a un dólar.
+La compuerta la frenó por su relación riesgo/beneficio, no por ser una stable —
+**el control correcto, por la razón equivocada**. Si su volatilidad hubiera
+dado un R:B aceptable por ruido, habría entrado: 5 dólares convertidos en 5
+dólares, pagando 0,2% de comisión por el viaje.
+
+La causa: `STABLES_USD` se escribe a mano y RLUSD no estaba.
+
+### El arreglo no es agregarla a la lista
+
+Agregarla sola habría sido perseguir el síntoma: salen stablecoins nuevas todo
+el tiempo y la lista vuelve a quedar corta. El motor **ya había resuelto este
+mismo problema** unas líneas más arriba, para los valores tokenizados de bolsa:
+lista para los conocidos, **detector de conducta para los demás** (volumen de
+fin de semana bajo el 10% del hábil).
+
+Se aplicó el mismo remedio: un activo cuya volatilidad diaria está bajo 0,5% no
+es operable por esta estrategia, se llame como se llame. El umbral es holgado a
+propósito — la cripto más quieta del radar real se mueve 3,2%/día y una stable
+ancla da ~0%.
+
+### Un test que no medía lo que decía medir
+
+La primera versión de la prueba pasó las tres mutaciones… en verde dos de tres:
+
+· Escribía el umbral **a mano** (0,5) en vez de leerlo del motor, así que
+  mutarlo a 5 no la afectaba: medía su propia constante, no la del sistema.
+· Comprobaba la aritmética del umbral pero **no que el detector estuviera
+  conectado**: quitar el `if` de `momentumModelo` la dejaba pasar igual.
+
+Rehecha: lee `STABLE_VOL_MAX_PCT` del motor, y ejercita `momentumModelo` contra
+el Binance de mentira —que genera velas planas, o sea volatilidad cero— para
+comprobar que de verdad devuelve null. Ahora las tres mutaciones se ponen en
+rojo.
+
+**Lección, otra vez la misma:** comprobar la aritmética de una regla no prueba
+que alguien la use. Y una prueba que copia la constante que quiere vigilar mide
+la copia. Las dos fallas se ven idénticas desde afuera — un test en verde.

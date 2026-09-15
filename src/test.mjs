@@ -2096,6 +2096,43 @@ test('sin API key el consejero queda inerte y no rompe nada', async () => {
   }
 });
 
+// --- UNA STABLECOIN NO DECLARADA NO PUEDE LLEGAR A CANDIDATA -----------------
+//
+// RLUSD no estaba en la lista y el motor la ofreció como activo operable; la
+// frenó la compuerta por R:B 0,25, o sea el control correcto por la razón
+// equivocada. La lista se escribe a mano y por eso se pudre: el detector mira
+// lo que el activo HACE, que es lo único que no depende de acordarse.
+test('un activo anclado al dólar queda fuera aunque nadie lo haya declarado', async () => {
+  const vol = motor._test.volatilidadDiaria;
+  // El umbral se LEE del motor, no se copia. La primera versión de esta prueba
+  // lo escribía a mano (0,5) y por eso seguía en verde al mutarlo a 5: medía su
+  // propia constante, no la del sistema.
+  const umbral = motor._test.STABLE_VOL_MAX_PCT;
+
+  const stable = Array.from({ length: 31 }, (_, i) => 1 + (i % 2 ? 0.0002 : -0.0002));
+  esperar(vol(stable) < umbral,
+    `una moneda anclada debe medir bajo el umbral; dio ${vol(stable).toFixed(3)} vs ${umbral}`);
+
+  // XRP, el activo más quieto que pasó el radar real (3,2%/día), tiene que
+  // quedar del lado operable: el umbral no puede barrer criptos de baja
+  // volatilidad junto con las stables.
+  let p = 1;
+  const quieto = Array.from({ length: 31 }, (_, i) => (p *= 1 + (i % 2 ? 0.032 : -0.031)));
+  esperar(vol(quieto) > umbral,
+    `una cripto quieta (3%/día) debe seguir siendo operable; dio ${vol(quieto).toFixed(2)} vs ${umbral}`);
+
+  // Y LO QUE DE VERDAD IMPORTA: que el detector esté CONECTADO. Comprobar la
+  // aritmética del umbral no prueba que alguien la use — el Binance de mentira
+  // genera velas planas, así que su volatilidad es cero y `momentumModelo`
+  // tiene que devolver null en vez de ofrecerla como candidata.
+  const comoCandidata = await sinRed({ AAAUSDT: 1 }, () => motor._test.momentumModelo('AAAUSDT'));
+  esperar(comoCandidata === null,
+    `un activo sin movimiento no puede salir como candidato; devolvió ${JSON.stringify(comoCandidata)}`);
+
+  esperar(motor._test.esStableUSD('RLUSD'), 'RLUSD tiene que estar entre las stables de USD');
+  esperar(!motor._test.esStableUSD('XRP'), 'y XRP no');
+});
+
 // --- correr ------------------------------------------------------------
 console.log(`\nTests de la matemática de dinero · sandbox ${sandbox}\n`);
 for (const c of casos) {
